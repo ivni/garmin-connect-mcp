@@ -18,8 +18,5 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install dependencies
-        run: make deps
-
-      - name: Run tests and linting
-        run: make can-release
+      - name: Run QA
+        run: uv run --locked scripts/qa.py

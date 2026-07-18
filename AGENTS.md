@@ -1,5 +1,5 @@
-Prefer make targets over direct commands. Run `make help` to see available targets.
+Use `uv` for Python dependency management and project commands.
 
-Run `make can-release` before wrapping up substantial changes.
+Run `uv run --locked scripts/qa.py` before wrapping up substantial changes.
 
 Detroit-style tests: assert on observable behaviour and mock only at the boundary.

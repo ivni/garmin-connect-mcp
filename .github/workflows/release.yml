@@ -20,6 +20,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
       - name: Extract version from changelog
         id: version
         run: |
@@ -51,41 +56,15 @@ jobs:
           echo "$CONTENT" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
-      - name: Update pyproject version
+      - name: Update project version
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          python - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          version = os.environ["VERSION"]
-          path = Path("pyproject.toml")
-          text = path.read_text()
-          updated, count = re.subn(
-              r'(?m)^version = "[^"]+"$',
-              f'version = "{version}"',
-              text,
-              count=1,
-          )
-          if count != 1:
-              raise SystemExit("Could not find pyproject.toml version")
-          path.write_text(updated)
-          PY
-
-          grep '^version = ' pyproject.toml
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-
-      - name: Install dependencies
-        run: make deps
+          uv version "$VERSION"
+          uv version
 
       - name: Run release checks
-        run: make can-release
+        run: uv run --locked scripts/qa.py
 
       - name: Build package
         run: make package/check
