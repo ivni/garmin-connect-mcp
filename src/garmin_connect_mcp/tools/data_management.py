@@ -173,7 +173,7 @@ async def _execute_health_write(
         raise ValueError("idempotency_key is required when dry_run is false")
     assert ctx is not None
     client = await ctx.get_state("client")
-    result = client.mutate(
+    result = await client.mutate(
         method_name,
         *method_args,
         **method_kwargs,

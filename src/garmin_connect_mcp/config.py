@@ -10,10 +10,6 @@ class ToolConfig(BaseSettings):
     enable_caching: bool = True
     cache_ttl_seconds: int = 3600  # 1 hour default
 
-    # Query limits
-    default_activity_limit: int = 20
-    max_activity_limit: int = 100
-
     # Unit preferences
     distance_unit: str = "km"  # "km" or "miles"
     elevation_unit: str = "m"  # "m" or "ft"

@@ -48,17 +48,21 @@ class GarminSessionManager:
         self._generation: str | None = None
         self._mutation_registries: dict[str, MutationRegistry] = {}
 
-    def get_read_client(self) -> GarminReadClient:
+    def get_read_client(
+        self,
+        preflight: Callable[[], None] | None = None,
+    ) -> GarminReadClient:
         """Return a facade that cannot invoke Garmin mutation methods."""
-        return GarminReadClient(self._get_client(), READ_METHODS)
+        return GarminReadClient(self._get_client(preflight), READ_METHODS)
 
     def get_mutation_client(
         self,
         operation: MutationOperation,
+        preflight: Callable[[], None] | None = None,
     ) -> GarminMutationClient:
         """Return a facade restricted to one authorized mutation method."""
         with self._lock:
-            client = self._get_client()
+            client = self._get_client(preflight)
             store = self.get_token_store()
             key = str(store.directory)
             registry = self._mutation_registries.get(key)
@@ -67,9 +71,14 @@ class GarminSessionManager:
                 self._mutation_registries[key] = registry
             return GarminMutationClient(client, operation, registry)
 
-    def _get_client(self) -> GarminClientWrapper:
+    def _get_client(
+        self,
+        preflight: Callable[[], None] | None = None,
+    ) -> GarminClientWrapper:
         """Load the unrestricted client for construction of restricted facades only."""
         with self._lock:
+            if preflight is not None:
+                preflight()
             store = self.get_token_store()
             try:
                 snapshot = store.read_snapshot()
@@ -90,7 +99,11 @@ class GarminSessionManager:
             # allowing the stale in-memory state to overwrite it.
             for _attempt in range(2):
                 try:
+                    if preflight is not None:
+                        preflight()
                     garmin = self._garmin_factory()
+                    if preflight is not None:
+                        preflight()
                     garmin.login(_inline_token_payload(snapshot.payload))
                     serialized = garmin.client.dumps()
                     # Even unchanged serialization must prove that the loaded

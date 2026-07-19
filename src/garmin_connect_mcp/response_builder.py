@@ -1,9 +1,12 @@
 """Response builder for structured Garmin Connect MCP responses."""
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
+
+import pydantic_core
+from pydantic import BaseModel
 
 from .pagination import PaginationInfo
 from .types import JSONSerializable, UnitSystem
@@ -70,6 +73,87 @@ class ResponseBuilder:
         }
 
     @staticmethod
+    def serialized_envelope_size(response: str, surface: str | None) -> int:
+        """Measure the actual FastMCP result envelope for a public response."""
+        if surface is not None and surface.startswith("garmin://"):
+            from fastmcp.resources import ResourceResult
+
+            envelope: BaseModel = ResourceResult(response).to_mcp_result(surface)
+        else:
+            from fastmcp.tools.base import ToolResult
+
+            internal_result = ToolResult(
+                content=response,
+                structured_content={"result": response},
+                meta={"fastmcp": {"wrap_result": True}},
+            )
+            envelope = cast(BaseModel, internal_result.to_mcp_result())
+        return len(envelope.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8"))
+
+    @staticmethod
+    def serialized_result_size(result: Any, surface: str) -> int:
+        """Measure the MCP wire result produced by a FastMCP middleware boundary."""
+        from fastmcp.resources import ResourceResult
+        from fastmcp.tools.base import ToolResult
+        from mcp.types import CallToolResult
+
+        if isinstance(result, ToolResult):
+            converted = result.to_mcp_result()
+            if isinstance(converted, BaseModel):
+                envelope = converted
+            elif isinstance(converted, tuple):
+                envelope = CallToolResult(
+                    content=converted[0],
+                    structuredContent=converted[1],
+                )
+            else:
+                envelope = CallToolResult(content=converted)
+        elif isinstance(result, ResourceResult):
+            envelope = result.to_mcp_result(surface)
+        elif isinstance(result, str):
+            return ResponseBuilder.serialized_envelope_size(result, surface)
+        elif isinstance(result, BaseModel):
+            envelope = result
+        else:
+            return len(pydantic_core.to_json(result, fallback=str))
+        return len(envelope.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8"))
+
+    @staticmethod
+    def serialized_tool_error_size(response: str) -> int:
+        """Measure the exact MCP error envelope produced for ``ToolError`` text."""
+        from mcp.types import CallToolResult, TextContent
+
+        envelope = CallToolResult(
+            content=[TextContent(type="text", text=response)],
+            isError=True,
+        )
+        return len(envelope.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8"))
+
+    @staticmethod
+    def result_contains_error(result: Any) -> bool:
+        """Recognize the stable top-level error envelope after a confirmed write."""
+        candidates: list[Any] = [result]
+        try:
+            from fastmcp.tools.base import ToolResult
+
+            if isinstance(result, ToolResult):
+                if result.structured_content is not None:
+                    candidates.append(result.structured_content.get("result"))
+                candidates.extend(getattr(item, "text", None) for item in result.content)
+        except ImportError:  # pragma: no cover - FastMCP is a runtime dependency
+            pass
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            try:
+                parsed = json.loads(candidate)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, Mapping) and isinstance(parsed.get("error"), Mapping):
+                return True
+        return False
+
+    @staticmethod
     def build_response(
         data: JSONSerializable,
         analysis: dict[str, Any] | None = None,
@@ -78,6 +162,7 @@ class ResponseBuilder:
         *,
         surface: str | None = None,
         policy_context: Mapping[str, object] | None = None,
+        _enforce_budget: bool = True,
     ) -> str:
         """
         Build a structured response with data, optional analysis, and metadata.
@@ -126,7 +211,150 @@ class ResponseBuilder:
 
         response["metadata"] = converted_meta
 
-        return json.dumps(response, separators=(",", ":"))
+        serialized = json.dumps(response, separators=(",", ":"))
+        from .query_budget import ResponseBudgetExceededError, current_request_budget
+
+        budget = current_request_budget()
+        if budget is not None and _enforce_budget:
+            byte_count = ResponseBuilder.serialized_envelope_size(serialized, surface)
+            if byte_count > budget.policy.max_response_bytes and budget.mutation_confirmed:
+                return ResponseBuilder.build_confirmed_mutation_budget_response(surface)
+            try:
+                budget.record_response_size(byte_count)
+            except ResponseBudgetExceededError as error:
+                return ResponseBuilder.build_budget_error_response(error)
+        return serialized
+
+    @staticmethod
+    def build_confirmed_mutation_budget_response(
+        surface: str | None,
+        *,
+        omitted_reason: str = "response_budget",
+    ) -> str:
+        """Return a bounded success when post-write delivery cannot be trusted."""
+        response = ResponseBuilder.build_response(
+            data={"result": {"success": True}},
+            analysis={
+                "insights": [
+                    "The Garmin mutation was confirmed; its verbose result was omitted "
+                    "so a later response failure cannot encourage an unsafe retry"
+                ]
+            },
+            metadata={
+                "mutation_confirmed": True,
+                "result_omitted": omitted_reason,
+            },
+            surface=surface,
+            _enforce_budget=False,
+        )
+        from .query_budget import current_request_budget
+
+        budget = current_request_budget()
+        if budget is not None:
+            budget.note_outcome("confirmed")
+            budget.record_response_size(ResponseBuilder.serialized_envelope_size(response, surface))
+        return response
+
+    @staticmethod
+    def build_bounded_collection_response(
+        *,
+        items: list[Any],
+        data_factory: Callable[[list[Any]], JSONSerializable],
+        metadata_factory: Callable[[int], dict[str, Any]],
+        pagination: PaginationInfo,
+        cursor_factory: Callable[[int], str],
+        surface: str,
+        analysis: dict[str, Any] | None = None,
+        policy_context: Mapping[str, object] | None = None,
+    ) -> str:
+        """Serialize the largest whole-item prefix that fits the request budget."""
+        from .query_budget import (
+            ResponseBudgetExceededError,
+            current_request_budget,
+        )
+
+        def render(count: int, page: PaginationInfo) -> str:
+            return ResponseBuilder.build_response(
+                data=data_factory(items[:count]),
+                analysis=analysis if count == len(items) else None,
+                metadata=metadata_factory(count),
+                pagination=page,
+                surface=surface,
+                policy_context=policy_context,
+                _enforce_budget=False,
+            )
+
+        full_response = render(len(items), pagination)
+        budget = current_request_budget()
+        if budget is None:
+            return full_response
+
+        full_size = ResponseBuilder.serialized_envelope_size(full_response, surface)
+        if full_size <= budget.policy.max_response_bytes:
+            budget.reserve_items(len(items))
+            budget.record_response_size(full_size)
+            return full_response
+
+        if not budget.policy.partial_results_allowed:
+            try:
+                budget.record_response_size(full_size)
+            except ResponseBudgetExceededError as error:
+                return ResponseBuilder.build_budget_error_response(error)
+            raise AssertionError("Oversized response was accepted by its budget")
+
+        best_response: str | None = None
+        best_count = 0
+        for count in range(1, len(items)):
+            bounded_page: PaginationInfo = {
+                "cursor": cursor_factory(count),
+                "has_more": True,
+                "limit": pagination["limit"],
+                "returned": count,
+                "partial": True,
+                "truncation_reason": "response_bytes",
+            }
+            candidate = render(count, bounded_page)
+            if (
+                ResponseBuilder.serialized_envelope_size(candidate, surface)
+                > budget.policy.max_response_bytes
+            ):
+                break
+            best_count = count
+            best_response = candidate
+
+        if best_response is None:
+            try:
+                budget.record_response_size(full_size)
+            except ResponseBudgetExceededError as error:
+                return ResponseBuilder.build_budget_error_response(error)
+            raise AssertionError("Oversized response was accepted by its budget")
+
+        budget.reserve_items(best_count)
+        budget.record_response_size(
+            ResponseBuilder.serialized_envelope_size(best_response, surface)
+        )
+        budget.note_truncation("response_bytes")
+        return best_response
+
+    @staticmethod
+    def preview_response_size(
+        *,
+        data: JSONSerializable,
+        metadata: dict[str, Any] | None = None,
+        pagination: PaginationInfo | dict[str, Any] | None = None,
+        surface: str | None = None,
+        policy_context: Mapping[str, object] | None = None,
+    ) -> int:
+        """Measure the exact projected serialized size without charging the budget."""
+        response = ResponseBuilder.build_response(
+            data=data,
+            metadata=metadata,
+            pagination=pagination,
+            surface=surface,
+            policy_context=policy_context,
+            _enforce_budget=False,
+        )
+        return ResponseBuilder.serialized_envelope_size(response, surface)
 
     @staticmethod
     def build_error_response(
@@ -149,9 +377,10 @@ class ResponseBuilder:
         """
         from .response_policy.errors import default_error_code
 
+        resolved_code = code or default_error_code(error_type)
         response: dict[str, Any] = {
             "error": {
-                "code": code or default_error_code(error_type),
+                "code": resolved_code,
                 "type": error_type,
                 "message": message,
                 "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -165,6 +394,11 @@ class ResponseBuilder:
         if suggestions:
             response["error"]["suggestions"] = suggestions
 
+        from .query_budget import current_request_budget
+
+        budget = current_request_budget()
+        if budget is not None:
+            budget.note_outcome(resolved_code)
         return json.dumps(response, separators=(",", ":"))
 
     @staticmethod
@@ -173,11 +407,43 @@ class ResponseBuilder:
         from .response_policy.errors import public_error_for_exception
 
         public = public_error_for_exception(error)
+        from .query_budget import current_request_budget
+
+        budget = current_request_budget()
+        if budget is not None:
+            budget.note_outcome(public.code)
         return ResponseBuilder.build_error_response(
             public.message,
             public.error_type,
             code=public.code,
             request_id=public.request_id,
+        )
+
+    @staticmethod
+    def build_budget_error_response(error: Exception) -> str:
+        """Build a stable budget failure without exposing internal values."""
+        from .query_budget import QueryBudgetError
+
+        if not isinstance(error, QueryBudgetError):
+            return ResponseBuilder.build_exception_response(error)
+        from .query_budget import current_request_budget
+
+        budget = current_request_budget()
+        if budget is not None:
+            budget.note_outcome(error.public_code)
+            if error.public_code == "RESPONSE_BUDGET_EXCEEDED":
+                budget.note_truncation("response_bytes")
+        if error.public_code in {
+            "AUTH_REQUIRED",
+            "RATE_LIMITED",
+            "GARMIN_UPSTREAM_UNAVAILABLE",
+            "CAPABILITY_UNAVAILABLE",
+        }:
+            return ResponseBuilder.build_exception_response(error)
+        return ResponseBuilder.build_error_response(
+            error.public_message,
+            error.error_type,
+            code=error.public_code,
         )
 
     @staticmethod

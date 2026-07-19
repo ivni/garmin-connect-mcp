@@ -25,7 +25,7 @@ from garmin_connect_mcp.client import (
     MutationRegistry,
 )
 from garmin_connect_mcp.token_store import TokenStore, TokenStoreLockTimeout
-from garmin_connect_mcp.write_policy import READ_METHODS, WritePolicy
+from garmin_connect_mcp.write_policy import MUTATION_TOOLS, READ_METHODS, WritePolicy
 
 
 class FakeWrapper:
@@ -363,4 +363,7 @@ def test_every_literal_read_safe_call_is_allowlisted():
             ):
                 called_methods.add(node.args[0].value)
 
-    assert called_methods <= READ_METHODS
+    mutation_dependency_methods = frozenset(
+        method for operation in MUTATION_TOOLS.values() for method in operation.dependency_methods
+    )
+    assert called_methods <= READ_METHODS | mutation_dependency_methods

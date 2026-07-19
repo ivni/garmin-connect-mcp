@@ -1,78 +1,215 @@
 """Activity-related tools for Garmin Connect MCP server."""
 
+from datetime import date as calendar_date
 from typing import Annotated, Any
 
 from fastmcp import Context
 
-from ..client import GarminAPIError, GarminClientWrapper
+from ..client import GarminAPIError
 from ..compatibility import unavailable_message
-from ..pagination import build_pagination_info, decode_cursor
+from ..pagination import (
+    MAX_CONTINUATION_POSITION,
+    decode_continuation_cursor,
+    encode_continuation_cursor,
+    validate_continuation_headroom,
+)
+from ..query_budget import (
+    InvalidContinuationCursorError,
+    QueryBudgetError,
+    current_request_budget,
+    policy_for_surface,
+    reserve_projected_response_items,
+    validate_date_range,
+    validate_page_size,
+)
 from ..response_builder import ResponseBuilder
-from ..time_utils import parse_date_string
 from ..types import UnitSystem
 
 
+def _activity_calendar_date(activity: dict[str, Any]) -> str | None:
+    """Return a validated calendar date without trusting malformed upstream rows."""
+    timestamp = activity.get("startTimeLocal") or activity.get("startTimeGMT")
+    candidate = str(timestamp)[:10] if timestamp is not None else ""
+    try:
+        return calendar_date.fromisoformat(candidate).isoformat()
+    except ValueError:
+        return None
+
+
 async def _query_activities_paginated(
-    client: GarminClientWrapper,
+    ctx: Context,
     start_date: str,
     end_date: str,
     activity_type: str,
     cursor: str | None,
-    limit: int,
+    limit: str | int | None,
     unit: UnitSystem,
     include_location: bool,
 ) -> str:
-    """Query activities by date range with cursor-based pagination."""
-    # Parse cursor to get current page
-    current_page = 1
-    if cursor:
+    """Page the upstream offset API while applying a bounded date filter."""
+    surface = "query_activities"
+    policy = policy_for_surface(surface)
+    bounded = validate_date_range(start_date, end_date, policy=policy)
+    filters: dict[str, Any] = {
+        "start_date": bounded.start_iso,
+        "end_date": bounded.end_iso,
+        "activity_type": activity_type,
+        "unit": unit,
+        "include_location": include_location,
+    }
+    if cursor is None:
+        position = 0
+        page_size = validate_page_size(limit, policy)
+    else:
         try:
-            cursor_data = decode_cursor(cursor)
-            current_page = cursor_data.get("page", 1)
-        except ValueError:
-            return ResponseBuilder.build_error_response(
-                "Invalid pagination cursor",
-                error_type="validation_error",
+            position, page_size = decode_continuation_cursor(
+                cursor,
+                surface=surface,
+                filters=filters,
+                policy=policy,
             )
+        except ValueError as exc:
+            raise InvalidContinuationCursorError from exc
+        if limit is not None and validate_page_size(limit, policy) != page_size:
+            raise InvalidContinuationCursorError
 
-    # Validate limit
-    if limit < 1 or limit > 50:
-        return ResponseBuilder.build_error_response(
-            f"Invalid limit: {limit}. Must be between 1 and 50.",
-            error_type="validation_error",
+    maximum_scan_advance = policy.max_api_calls * policy.max_page_items
+    if position + maximum_scan_advance > MAX_CONTINUATION_POSITION:
+        raise InvalidContinuationCursorError
+
+    activities: list[dict[str, Any]] = []
+    activity_positions: list[int] = []
+    scan_position = position
+    next_position: int | None = None
+    truncation_reason: str | None = None
+    exhausted = False
+    response_limited = False
+    upstream_page_size = policy.max_page_items
+    budget = current_request_budget()
+    client = await ctx.get_state("client")
+
+    while len(activities) <= page_size and not exhausted:
+        if budget is not None and budget.calls_used >= policy.max_api_calls:
+            next_position = scan_position
+            truncation_reason = "api_call_budget"
+            break
+        batch_start = scan_position
+        batch = await client.call(
+            "get_activities",
+            batch_start,
+            upstream_page_size,
+            activity_type or None,
+        )
+        if not isinstance(batch, list) or not batch:
+            exhausted = True
+            break
+        for index, activity in enumerate(batch):
+            scan_position = batch_start + index + 1
+            if not isinstance(activity, dict):
+                continue
+            activity_date = _activity_calendar_date(activity)
+            if activity_date is None:
+                continue
+            if activity_date > bounded.end_iso:
+                continue
+            if activity_date < bounded.start_iso:
+                # Local calendar dates are not guaranteed to be monotonic in a
+                # recency-ordered feed (travel and offset changes can reorder them).
+                continue
+            activities.append(activity)
+            activity_positions.append(scan_position)
+            if budget is not None:
+                preview_cursor = encode_continuation_cursor(
+                    surface=surface,
+                    position=scan_position,
+                    page_size=page_size,
+                    filters=filters,
+                )
+                preview_size = ResponseBuilder.preview_response_size(
+                    data={
+                        "activities": [
+                            ResponseBuilder.format_activity(act, unit) for act in activities
+                        ],
+                        "aggregated": ResponseBuilder.aggregate_activities(
+                            activities,
+                            unit,
+                        ),
+                    },
+                    metadata={
+                        "query_type": "activity_list",
+                        "start_date": bounded.start_iso,
+                        "end_date": bounded.end_iso,
+                        "activity_type": activity_type or "all",
+                        "unit": unit,
+                    },
+                    pagination={
+                        "cursor": preview_cursor,
+                        "has_more": True,
+                        "limit": page_size,
+                        "returned": len(activities),
+                        "partial": True,
+                        "truncation_reason": "response_bytes",
+                    },
+                    surface=surface,
+                    policy_context={"include_location": include_location},
+                )
+                if preview_size > budget.policy.max_response_bytes:
+                    if len(activities) == 1:
+                        budget.record_response_size(preview_size)
+                        raise AssertionError("Oversized response was accepted by its budget")
+                    activities.pop()
+                    activity_positions.pop()
+                    next_position = scan_position - 1
+                    truncation_reason = "response_bytes"
+                    response_limited = True
+                    break
+            if len(activities) > page_size:
+                next_position = scan_position - 1
+                truncation_reason = "page_limit"
+                break
+        if len(activities) > page_size:
+            break
+        if response_limited:
+            break
+        if len(batch) < upstream_page_size:
+            exhausted = True
+
+    has_more = next_position is not None
+
+    def filtered_activity_cursor(cursor_position: int) -> str:
+        validate_continuation_headroom(cursor_position, maximum_scan_advance)
+        return encode_continuation_cursor(
+            surface=surface,
+            position=cursor_position,
+            page_size=page_size,
+            filters=filters,
         )
 
-    # Fetch all activities in date range (Garmin API doesn't support offset pagination directly)
-    # So we fetch all and slice in memory
-    all_activities = client.safe_call("get_activities_by_date", start_date, end_date, activity_type)
-
-    # Calculate offset for current page
-    offset = (current_page - 1) * limit
-
-    # Fetch limit+1 to detect if there are more pages
-    fetch_limit = limit + 1
-    activities = all_activities[offset : offset + fetch_limit]
-
-    # Check if there are more results
-    has_more = len(activities) > limit
-    activities = activities[:limit]
-
-    # Build pagination filters
-    pagination_filters: dict[str, Any] = {
-        "start_date": start_date,
-        "end_date": end_date,
+    if has_more:
+        next_cursor = filtered_activity_cursor(next_position)
+    else:
+        next_cursor = None
+    activities = activities[:page_size]
+    activity_positions = activity_positions[:page_size]
+    pagination: dict[str, Any] = {
+        "cursor": next_cursor,
+        "has_more": has_more,
+        "limit": page_size,
+        "returned": len(activities),
     }
-    if activity_type:
-        pagination_filters["activity_type"] = activity_type
-
-    # Build pagination info
-    pagination = build_pagination_info(
-        returned_count=len(activities),
-        limit=limit,
-        current_page=current_page,
-        has_more=has_more,
-        filters=pagination_filters,
-    )
+    if has_more:
+        pagination.update(
+            partial=True,
+            truncation_reason=truncation_reason or "page_limit",
+        )
+        if budget is not None:
+            budget.note_truncation(
+                {
+                    "page_limit": "page_items",
+                    "api_call_budget": "api_calls",
+                    "response_bytes": "response_bytes",
+                }[truncation_reason or "page_limit"]
+            )
 
     if not activities:
         type_msg = f" of type '{activity_type}'" if activity_type else ""
@@ -80,8 +217,8 @@ async def _query_activities_paginated(
             data={"activities": [], "count": 0},
             metadata={
                 "query_type": "activity_list",
-                "start_date": start_date,
-                "end_date": end_date,
+                "start_date": bounded.start_iso,
+                "end_date": bounded.end_iso,
                 "activity_type": activity_type or "all",
                 "unit": unit,
             },
@@ -93,79 +230,95 @@ async def _query_activities_paginated(
             policy_context={"include_location": include_location},
         )
 
-    # Format activities
-    formatted_activities = [ResponseBuilder.format_activity(act, unit) for act in activities]
-
-    # Aggregate metrics
-    aggregated = ResponseBuilder.aggregate_activities(activities, unit)
-
-    return ResponseBuilder.build_response(
-        data={"activities": formatted_activities, "aggregated": aggregated},
-        metadata={
+    return ResponseBuilder.build_bounded_collection_response(
+        items=activities,
+        data_factory=lambda values: {
+            "activities": [ResponseBuilder.format_activity(act, unit) for act in values],
+            "aggregated": ResponseBuilder.aggregate_activities(values, unit),
+        },
+        metadata_factory=lambda _count: {
             "query_type": "activity_list",
-            "start_date": start_date,
-            "end_date": end_date,
+            "start_date": bounded.start_iso,
+            "end_date": bounded.end_iso,
             "activity_type": activity_type or "all",
             "unit": unit,
         },
         pagination=pagination,
+        cursor_factory=lambda count: filtered_activity_cursor(activity_positions[count - 1]),
         surface="query_activities",
         policy_context={"include_location": include_location},
     )
 
 
 async def _query_activities_general_paginated(
-    client: GarminClientWrapper,
+    ctx: Context,
     activity_type: str,
     cursor: str | None,
-    limit: int,
+    limit: str | int | None,
     unit: UnitSystem,
     include_location: bool,
 ) -> str:
     """Query activities with general pagination (no date filter)."""
-    # Parse cursor to get current page
-    current_page = 1
-    if cursor:
+    surface = "query_activities"
+    policy = policy_for_surface(surface)
+    filters = {
+        "activity_type": activity_type,
+        "unit": unit,
+        "include_location": include_location,
+    }
+    if cursor is None:
+        start_index = 0
+        page_size = validate_page_size(limit, policy)
+    else:
         try:
-            cursor_data = decode_cursor(cursor)
-            current_page = cursor_data.get("page", 1)
-        except ValueError:
-            return ResponseBuilder.build_error_response(
-                "Invalid pagination cursor",
-                error_type="validation_error",
+            start_index, page_size = decode_continuation_cursor(
+                cursor,
+                surface=surface,
+                filters=filters,
+                policy=policy,
             )
+        except ValueError as exc:
+            raise InvalidContinuationCursorError from exc
+        if limit is not None and validate_page_size(limit, policy) != page_size:
+            raise InvalidContinuationCursorError
 
-    # Validate limit
-    if limit < 1 or limit > 50:
-        return ResponseBuilder.build_error_response(
-            f"Invalid limit: {limit}. Must be between 1 and 50.",
-            error_type="validation_error",
-        )
-
-    # Calculate start index for Garmin API (0-based)
-    start_index = (current_page - 1) * limit
-
-    # Fetch limit+1 to detect if there are more pages
-    fetch_limit = limit + 1
-    activities = client.safe_call("get_activities", start_index, fetch_limit, activity_type)
+    client = await ctx.get_state("client")
+    fetch_limit = page_size + 1
+    activities = await client.call(
+        "get_activities",
+        start_index,
+        fetch_limit,
+        activity_type or None,
+    )
+    if not isinstance(activities, list):
+        activities = []
 
     # Check if there are more results
-    has_more = len(activities) > limit
-    activities = activities[:limit]
+    has_more = len(activities) > page_size
+    activities = activities[:page_size]
 
-    # Build pagination filters
-    pagination_filters: dict[str, Any] = {}
-    if activity_type:
-        pagination_filters["activity_type"] = activity_type
+    def general_activity_cursor(count: int) -> str:
+        next_position = start_index + count
+        validate_continuation_headroom(next_position, (2 * page_size) + 1)
+        return encode_continuation_cursor(
+            surface=surface,
+            position=next_position,
+            page_size=page_size,
+            filters=filters,
+        )
 
-    # Build pagination info
-    pagination = build_pagination_info(
-        returned_count=len(activities),
-        limit=limit,
-        current_page=current_page,
-        has_more=has_more,
-        filters=pagination_filters,
-    )
+    next_cursor = general_activity_cursor(len(activities)) if has_more else None
+    pagination: dict[str, Any] = {
+        "cursor": next_cursor,
+        "has_more": has_more,
+        "limit": page_size,
+        "returned": len(activities),
+    }
+    if has_more:
+        pagination.update(partial=True, truncation_reason="page_limit")
+        budget = current_request_budget()
+        if budget is not None:
+            budget.note_truncation("page_items")
 
     if not activities:
         type_msg = f" of type '{activity_type}'" if activity_type else ""
@@ -182,20 +335,19 @@ async def _query_activities_general_paginated(
             policy_context={"include_location": include_location},
         )
 
-    # Format activities
-    formatted_activities = [ResponseBuilder.format_activity(act, unit) for act in activities]
-
-    # Aggregate metrics
-    aggregated = ResponseBuilder.aggregate_activities(activities, unit)
-
-    return ResponseBuilder.build_response(
-        data={"activities": formatted_activities, "aggregated": aggregated},
-        metadata={
+    return ResponseBuilder.build_bounded_collection_response(
+        items=activities,
+        data_factory=lambda values: {
+            "activities": [ResponseBuilder.format_activity(act, unit) for act in values],
+            "aggregated": ResponseBuilder.aggregate_activities(values, unit),
+        },
+        metadata_factory=lambda _count: {
             "query_type": "activity_list",
             "activity_type": activity_type or "all",
             "unit": unit,
         },
         pagination=pagination,
+        cursor_factory=general_activity_cursor,
         surface="query_activities",
         policy_context={"include_location": include_location},
     )
@@ -211,7 +363,7 @@ async def query_activities(
     ] = None,
     limit: Annotated[
         str | int | None,
-        "Maximum activities per page (1-50). Default: 10. "
+        "Maximum activities per page (1-50). Default: 20. "
         "Use pagination cursor for large datasets.",
     ] = None,
     activity_type: Annotated[str, "Activity type filter (e.g., 'running', 'cycling')"] = "",
@@ -259,21 +411,41 @@ async def query_activities(
     """
     assert ctx is not None
     try:
-        client = await ctx.get_state("client")
+        if activity_id is not None and any(
+            value is not None for value in (start_date, end_date, date, cursor, limit)
+        ):
+            return ResponseBuilder.build_error_response(
+                "activity_id cannot be combined with date, range, cursor, or limit",
+                "invalid_parameters",
+            )
+        if date is not None and (start_date is not None or end_date is not None):
+            return ResponseBuilder.build_error_response(
+                "date cannot be combined with a date range",
+                "invalid_parameters",
+            )
+        if (start_date is None) != (end_date is None):
+            from ..query_budget import InvalidDateRangeError
 
-        # Coerce limit to int if passed as string
-        if limit is not None and isinstance(limit, str):
-            try:
-                limit = int(limit)
-            except ValueError:
-                return ResponseBuilder.build_error_response(
-                    f"Invalid limit value: '{limit}'. Must be a number between 1 and 50.",
-                    error_type="validation_error",
-                )
-
+            raise InvalidDateRangeError
+        if start_date is not None:
+            validate_date_range(
+                start_date,
+                end_date,
+                policy=policy_for_surface("query_activities"),
+            )
+        normalized_date = (
+            validate_date_range(
+                date,
+                date,
+                policy=policy_for_surface("query_activities"),
+            ).start_iso
+            if date is not None
+            else None
+        )
         # Pattern 1: Specific activity by ID
         if activity_id is not None:
-            activity = client.safe_call("get_activity", activity_id)
+            client = await ctx.get_state("client")
+            activity = await client.call("get_activity", activity_id)
 
             if not activity:
                 return ResponseBuilder.build_error_response(
@@ -287,9 +459,15 @@ async def query_activities(
 
             # Format the activity with rich data
             formatted_activity = ResponseBuilder.format_activity(activity, unit)
+            single_data = {"activity": formatted_activity}
+            reserve_projected_response_items(
+                "query_activities",
+                single_data,
+                {"include_location": include_location},
+            )
 
             return ResponseBuilder.build_response(
-                data={"activity": formatted_activity},
+                data=single_data,
                 metadata={
                     "query_type": "single_activity",
                     "activity_id": activity_id,
@@ -302,77 +480,44 @@ async def query_activities(
         # Pattern 2: Date range query (with pagination)
         if start_date and end_date:
             return await _query_activities_paginated(
-                client=client,
+                ctx=ctx,
                 start_date=start_date,
                 end_date=end_date,
                 activity_type=activity_type,
                 cursor=cursor,
-                limit=limit or 10,
+                limit=limit,
                 unit=unit,
                 include_location=include_location,
             )
 
         # Pattern 3: Specific date query
-        if date:
-            # Parse date string (supports 'today', 'yesterday', or YYYY-MM-DD)
-            parsed_date = parse_date_string(date)
-            date_str = parsed_date.strftime("%Y-%m-%d")
-
-            activities = client.safe_call(
-                "get_activities_by_date",
-                date_str,
-                date_str,
-                activity_type if activity_type else None,
-            )
-
-            if not activities:
-                type_msg = f" of type '{activity_type}'" if activity_type else ""
-                return ResponseBuilder.build_response(
-                    data={"activities": [], "count": 0},
-                    metadata={
-                        "query_type": "activity_list",
-                        "date": date_str,
-                        "activity_type": activity_type or "all",
-                        "unit": unit,
-                    },
-                    analysis={"insights": [f"No activities found{type_msg} for {date_str}"]},
-                    surface="query_activities",
-                    policy_context={"include_location": include_location},
-                )
-
-            formatted_activities = [
-                ResponseBuilder.format_activity(act, unit) for act in activities
-            ]
-
-            # Aggregate metrics
-            aggregated = ResponseBuilder.aggregate_activities(activities, unit)
-
-            return ResponseBuilder.build_response(
-                data={"activities": formatted_activities, "aggregated": aggregated},
-                metadata={
-                    "query_type": "activity_list",
-                    "date": date_str,
-                    "activity_type": activity_type or "all",
-                    "unit": unit,
-                },
-                surface="query_activities",
-                policy_context={"include_location": include_location},
+        if normalized_date is not None:
+            return await _query_activities_paginated(
+                ctx=ctx,
+                start_date=normalized_date,
+                end_date=normalized_date,
+                activity_type=activity_type,
+                cursor=cursor,
+                limit=limit,
+                unit=unit,
+                include_location=include_location,
             )
 
         # Pattern 4: Pagination query (general pagination using Garmin's start/limit API)
         if cursor is not None or limit is not None:
             # Use cursor-based pagination for general queries
             return await _query_activities_general_paginated(
-                client=client,
+                ctx=ctx,
                 activity_type=activity_type,
                 cursor=cursor,
-                limit=limit or 10,
+                limit=limit,
                 unit=unit,
                 include_location=include_location,
             )
 
         # Pattern 5: Last activity (default)
-        activity = client.safe_call("get_last_activity")
+        client = await ctx.get_state("client")
+        activity = await client.call("get_last_activity")
 
         if not activity:
             return ResponseBuilder.build_response(
@@ -383,14 +528,22 @@ async def query_activities(
             )
 
         formatted_activity = ResponseBuilder.format_activity(activity, unit)
+        last_data = {"activity": formatted_activity}
+        reserve_projected_response_items(
+            "query_activities",
+            last_data,
+            {"include_location": include_location},
+        )
 
         return ResponseBuilder.build_response(
-            data={"activity": formatted_activity},
+            data=last_data,
             metadata={"query_type": "last_activity", "unit": unit},
             surface="query_activities",
             policy_context={"include_location": include_location},
         )
 
+    except QueryBudgetError as exc:
+        return ResponseBuilder.build_budget_error_response(exc)
     except GarminAPIError as e:
         return ResponseBuilder.build_exception_response(e)
     except Exception as e:
@@ -697,7 +850,7 @@ async def get_activity_details(
         client = await ctx.get_state("client")
 
         # Start with base activity data
-        activity = client.safe_call("get_activity", activity_id)
+        activity = await client.call("get_activity", activity_id)
 
         if not activity:
             return ResponseBuilder.build_error_response(
@@ -716,14 +869,14 @@ async def get_activity_details(
         # Fetch optional details
         if include_splits:
             try:
-                splits = client.safe_call("get_activity_splits", activity_id)
+                splits = await client.call("get_activity_splits", activity_id)
                 details["splits"] = splits
 
                 # If only 1 lap, try to compute accurate splits from detailed time-series data
                 if splits and "lapDTOs" in splits and len(splits["lapDTOs"]) == 1:
                     # Try to get accurate splits from activity details API
                     try:
-                        activity_details = client.safe_call(
+                        activity_details = await client.call(
                             "get_activity_details", activity_id, maxchart=2000
                         )
                         accurate_splits = _compute_accurate_splits_from_details(
@@ -738,40 +891,52 @@ async def get_activity_details(
                             estimated_splits = _compute_estimated_splits(activity, unit)
                             if estimated_splits.get("estimated"):
                                 details["computed_splits"] = estimated_splits
+                    except QueryBudgetError:
+                        raise
                     except Exception:
                         # If details API fails, fall back to estimated splits
                         estimated_splits = _compute_estimated_splits(activity, unit)
                         if estimated_splits.get("estimated"):
                             details["computed_splits"] = estimated_splits
 
+            except QueryBudgetError:
+                raise
             except Exception:
                 details["splits"] = None
 
         if include_weather:
             try:
-                weather = client.safe_call("get_activity_weather", activity_id)
+                weather = await client.call("get_activity_weather", activity_id)
                 details["weather"] = weather
+            except QueryBudgetError:
+                raise
             except Exception:
                 details["weather"] = None
 
         if include_hr_zones:
             try:
-                hr_zones = client.safe_call("get_activity_hr_in_timezones", activity_id)
+                hr_zones = await client.call("get_activity_hr_in_timezones", activity_id)
                 details["hr_zones"] = hr_zones
+            except QueryBudgetError:
+                raise
             except Exception:
                 details["hr_zones"] = None
 
         if include_gear:
             try:
-                gear = client.safe_call("get_activity_gear", activity_id)
+                gear = await client.call("get_activity_gear", activity_id)
                 details["gear"] = gear
+            except QueryBudgetError:
+                raise
             except Exception:
                 details["gear"] = None
 
         if include_exercise_sets:
             try:
-                sets = client.safe_call("get_activity_exercise_sets", activity_id)
+                sets = await client.call("get_activity_exercise_sets", activity_id)
                 details["exercise_sets"] = sets
+            except QueryBudgetError:
+                raise
             except Exception:
                 details["exercise_sets"] = None
 
@@ -800,6 +965,11 @@ async def get_activity_details(
         if details.get("gear"):
             insights.append("Gear information recorded for this activity")
 
+        reserve_projected_response_items(
+            "get_activity_details",
+            details,
+            {"include_location": include_location},
+        )
         return ResponseBuilder.build_response(
             data=details,
             analysis={"insights": insights} if insights else None,
@@ -819,6 +989,8 @@ async def get_activity_details(
             policy_context={"include_location": include_location},
         )
 
+    except QueryBudgetError as exc:
+        return ResponseBuilder.build_budget_error_response(exc)
     except GarminAPIError as e:
         return ResponseBuilder.build_exception_response(e)
     except Exception as e:

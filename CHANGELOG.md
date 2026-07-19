@@ -54,6 +54,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add immutable per-surface range, item, Garmin-call, deadline, and serialized
+  UTF-8 response budgets with versioned query-bound continuation cursors
+- Add bounded date pagination and partial-result metadata for activities and
+  multi-day health tools, including byte-aware continuation before a whole item
+  would exceed the response ceiling
+- Make session acquisition lazy, recheck cancellation under the shared dispatch lock, and
+  enforce the byte ceiling against the real serialized FastMCP result
+- Preserve a confirmed mutation as a compact success if its verbose result exceeds the final
+  response envelope or later response delivery fails, avoiding an unsafe retry signal after
+  Garmin has committed the write
+- Expand date-wide weight deletion into one bounded lookup and at most ten direct deletes, with
+  per-dispatch deadline checks and partial-mutation quarantine
+- Add bounded workout and challenge pages; report dependency-internal unbounded goals and
+  earned badges as unavailable rather than allowing hidden fan-out
 - Add response schema `2`, a documented per-surface data-exposure matrix, and
   stable public error codes with correlation IDs for runtime failures
 
@@ -65,6 +79,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Move blocking Garmin reads and writes off the async event loop, enforce cancellation and
+  terminal fan-out behavior, and reject expensive date/call combinations before
+  requesting an authenticated client
+- Bound activities, health, training, performance, device-solar, weight, gear, profile,
+  goals/records, and women's-health results; reduce training aggregation to one activity pass
 - Replace implicit raw Garmin response fields with named domain projections;
   preserve functionally required activity, workout, gear, and device IDs
 - Keep women's-health data available through its explicit tool without adding a

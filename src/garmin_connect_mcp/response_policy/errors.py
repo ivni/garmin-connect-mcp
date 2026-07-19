@@ -6,9 +6,13 @@ import logging
 import secrets
 from dataclasses import dataclass
 
+from fastmcp.exceptions import ValidationError as FastMCPValidationError
+from pydantic import ValidationError as PydanticValidationError
+
 from ..client import (
     GarminAPIError,
     GarminAuthenticationError,
+    GarminInvalidIdempotencyKeyError,
     GarminMethodNotAllowedError,
     GarminMethodUnavailableError,
     GarminMutationInProgressError,
@@ -16,6 +20,7 @@ from ..client import (
     GarminNotFoundError,
     GarminRateLimitError,
 )
+from ..query_budget import QueryBudgetError
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,27 @@ def public_error_for_exception(error: Exception) -> PublicError:
             "AUTH_REQUIRED",
             "authentication_error",
             "Garmin authentication is required. Run 'garmin-connect-mcp auth'.",
+            request_id,
+        )
+    if isinstance(error, (FastMCPValidationError, PydanticValidationError)):
+        return PublicError(
+            "VALIDATION_ERROR",
+            "invalid_parameters",
+            "Tool arguments do not match the required schema.",
+            request_id,
+        )
+    if isinstance(error, GarminInvalidIdempotencyKeyError):
+        return PublicError(
+            "VALIDATION_ERROR",
+            "invalid_parameters",
+            "idempotency_key must match the documented format.",
+            request_id,
+        )
+    if isinstance(error, QueryBudgetError):
+        return PublicError(
+            error.public_code,
+            error.error_type,
+            error.public_message,
             request_id,
         )
     if isinstance(error, GarminRateLimitError):

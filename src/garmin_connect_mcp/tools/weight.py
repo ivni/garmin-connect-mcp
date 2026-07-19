@@ -6,6 +6,13 @@ from typing import Annotated
 from fastmcp import Context
 
 from ..client import GarminAPIError
+from ..query_budget import (
+    InvalidDateRangeError,
+    current_request_budget,
+    policy_for_surface,
+    reserve_projected_response_items,
+    validate_date_range,
+)
 from ..response_builder import ResponseBuilder
 from ..time_utils import local_noon_timestamp, parse_date_string
 
@@ -23,34 +30,59 @@ async def query_weight_data(
     """
     assert ctx is not None
     try:
-        client = await ctx.get_state("client")
-
         # Determine query type
         if date:
-            parsed_date = parse_date_string(date)
-            date_str = parsed_date.strftime("%Y-%m-%d")
-            weight_data = client.safe_call("get_daily_weigh_ins", date_str)
-            return ResponseBuilder.build_response(
-                data={"weigh_ins": weight_data, "date": date_str},
-                metadata={"query_type": "single_date", "date": date_str},
-                surface="query_weight_data",
+            if start_date is not None or end_date is not None:
+                raise InvalidDateRangeError
+            date_str = validate_date_range(
+                date,
+                date,
+                policy=policy_for_surface("query_weight_data"),
+            ).start_iso
+            query_range = None
+        elif start_date is not None or end_date is not None:
+            query_range = validate_date_range(
+                start_date,
+                end_date,
+                policy=policy_for_surface("query_weight_data"),
             )
-        elif start_date and end_date:
-            weight_data = client.safe_call("get_weigh_ins", start_date, end_date)
-            return ResponseBuilder.build_response(
-                data={"weigh_ins": weight_data},
-                metadata={"query_type": "range", "start_date": start_date, "end_date": end_date},
-                surface="query_weight_data",
-            )
+            date_str = None
         else:
-            # Default to today
+            query_range = None
             date_str = parse_date_string("today").strftime("%Y-%m-%d")
-            weight_data = client.safe_call("get_daily_weigh_ins", date_str)
+
+        budget = current_request_budget()
+        if budget is not None:
+            budget.require_calls(1)
+        client = await ctx.get_state("client")
+
+        if date_str is not None:
+            weight_data = await client.call("get_daily_weigh_ins", date_str)
+            data = {"weigh_ins": weight_data, "date": date_str}
+            reserve_projected_response_items("query_weight_data", data)
             return ResponseBuilder.build_response(
-                data={"weigh_ins": weight_data, "date": date_str},
+                data=data,
                 metadata={"query_type": "single_date", "date": date_str},
                 surface="query_weight_data",
             )
+        if query_range is not None:
+            weight_data = await client.call(
+                "get_weigh_ins",
+                query_range.start_iso,
+                query_range.end_iso,
+            )
+            data = {"weigh_ins": weight_data}
+            reserve_projected_response_items("query_weight_data", data)
+            return ResponseBuilder.build_response(
+                data=data,
+                metadata={
+                    "query_type": "range",
+                    "start_date": query_range.start_iso,
+                    "end_date": query_range.end_iso,
+                },
+                surface="query_weight_data",
+            )
+        raise RuntimeError("Weight query selection was not resolved")
 
     except GarminAPIError as e:
         return ResponseBuilder.build_exception_response(e)
@@ -88,7 +120,7 @@ async def add_weight_entry(
         _require_idempotency_key(idempotency_key)
         assert ctx is not None
         client = await ctx.get_state("client")
-        result = client.mutate(
+        result = await client.mutate(
             "add_weigh_in",
             weight,
             "kg",
@@ -155,7 +187,7 @@ async def delete_weight_entries(
         _require_idempotency_key(idempotency_key)
         assert ctx is not None
         client = await ctx.get_state("client")
-        result = client.mutate(
+        result = await client.mutate(
             "delete_weigh_ins",
             date_str,
             True,

@@ -5,6 +5,7 @@ from typing import Annotated
 from fastmcp import Context
 
 from ..client import GarminAPIError
+from ..query_budget import QueryBudgetError, reserve_projected_response_items
 from ..response_builder import ResponseBuilder
 
 
@@ -43,24 +44,30 @@ async def query_gear(
 
         # Get all gear
         try:
-            gear = client.safe_call("get_gear", profile_number)
+            gear = await client.call("get_gear", profile_number)
             data["gear"] = gear
+        except QueryBudgetError:
+            raise
         except Exception:
             data["gear"] = None
 
         # Gear defaults
         if include_defaults:
             try:
-                defaults = client.safe_call("get_gear_defaults", profile_number)
+                defaults = await client.call("get_gear_defaults", profile_number)
                 data["defaults"] = defaults
+            except QueryBudgetError:
+                raise
             except Exception:
                 data["defaults"] = None
 
         # Gear stats
         if include_stats:
             try:
-                stats = client.safe_call("get_gear_stats", gear_uuid)
+                stats = await client.call("get_gear_stats", gear_uuid)
                 data["stats"] = stats
+            except QueryBudgetError:
+                raise
             except Exception:
                 data["stats"] = None
 
@@ -73,6 +80,7 @@ async def query_gear(
         if data.get("stats"):
             insights.append("Usage statistics available")
 
+        reserve_projected_response_items("query_gear", data)
         return ResponseBuilder.build_response(
             data=data,
             analysis={"insights": insights} if insights else None,
@@ -83,6 +91,8 @@ async def query_gear(
             surface="query_gear",
         )
 
+    except QueryBudgetError as exc:
+        return ResponseBuilder.build_budget_error_response(exc)
     except GarminAPIError as e:
         return ResponseBuilder.build_exception_response(e)
     except Exception as e:

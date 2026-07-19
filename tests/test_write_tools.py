@@ -20,7 +20,7 @@ class FakeMutationClient:
     def __init__(self):
         self.calls = []
 
-    def mutate(self, method_name, *args, idempotency_key, **kwargs):
+    async def mutate(self, method_name, *args, idempotency_key, **kwargs):
         self.calls.append((method_name, args, kwargs, idempotency_key))
         return {"accepted": True}
 

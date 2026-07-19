@@ -5,6 +5,14 @@ from typing import Annotated
 from fastmcp import Context
 
 from ..client import GarminAPIError
+from ..query_budget import (
+    InvalidDateRangeError,
+    QueryBudgetError,
+    current_request_budget,
+    policy_for_surface,
+    reserve_projected_response_items,
+    validate_date_range,
+)
 from ..response_builder import ResponseBuilder
 from ..time_utils import parse_date_string
 
@@ -39,42 +47,68 @@ async def query_devices(
         )
 
     try:
-        solar_start = parse_date_string(solar_start_date or "today").strftime("%Y-%m-%d")
-        solar_end = parse_date_string(solar_end_date or solar_start).strftime("%Y-%m-%d")
-    except ValueError as exc:
-        return ResponseBuilder.build_error_response(str(exc), "invalid_parameters")
-    if solar_start > solar_end:
-        return ResponseBuilder.build_error_response(
-            "solar_start_date must be before or equal to solar_end_date",
-            "invalid_parameters",
-        )
+        if not include_solar_data and (solar_start_date is not None or solar_end_date is not None):
+            raise InvalidDateRangeError
+        if include_solar_data:
+            normalized_start = parse_date_string(solar_start_date or "today").strftime("%Y-%m-%d")
+            bounded = validate_date_range(
+                normalized_start,
+                solar_end_date or normalized_start,
+                policy=policy_for_surface("query_devices"),
+            )
+            solar_start = bounded.start_iso
+            solar_end = bounded.end_iso
+        else:
+            solar_start = None
+            solar_end = None
+    except QueryBudgetError as exc:
+        return ResponseBuilder.build_budget_error_response(exc)
+    except ValueError:
+        return ResponseBuilder.build_budget_error_response(InvalidDateRangeError())
 
     assert ctx is not None
     try:
+        required_calls = (
+            1
+            + int(include_last_used)
+            + int(include_primary)
+            + int(device_id is not None and include_settings)
+            + int(device_id is not None and include_solar_data)
+            + int(include_alarms)
+        )
+        budget = current_request_budget()
+        if budget is not None:
+            budget.require_calls(required_calls)
         client = await ctx.get_state("client")
 
         data = {}
 
         # Get all devices
         try:
-            devices = client.safe_call("get_devices")
+            devices = await client.call("get_devices")
             data["devices"] = devices
+        except QueryBudgetError:
+            raise
         except Exception:
             data["devices"] = None
 
         # Last used device
         if include_last_used:
             try:
-                last_used = client.safe_call("get_device_last_used")
+                last_used = await client.call("get_device_last_used")
                 data["last_used"] = last_used
+            except QueryBudgetError:
+                raise
             except Exception:
                 data["last_used"] = None
 
         # Primary training device
         if include_primary:
             try:
-                primary = client.safe_call("get_primary_training_device")
+                primary = await client.call("get_primary_training_device")
                 data["primary_device"] = primary
+            except QueryBudgetError:
+                raise
             except Exception:
                 data["primary_device"] = None
 
@@ -82,24 +116,30 @@ async def query_devices(
         if device_id is not None:
             if include_settings:
                 try:
-                    settings = client.safe_call("get_device_settings", device_id)
+                    settings = await client.call("get_device_settings", device_id)
                     data["device_settings"] = settings
+                except QueryBudgetError:
+                    raise
                 except Exception:
                     data["device_settings"] = None
 
             if include_solar_data:
                 try:
-                    solar = client.safe_call(
+                    solar = await client.call(
                         "get_device_solar_data", device_id, solar_start, solar_end
                     )
                     data["solar_data"] = solar
+                except QueryBudgetError:
+                    raise
                 except Exception:
                     data["solar_data"] = None
 
         if include_alarms:
             try:
-                alarms = client.safe_call("get_device_alarms")
+                alarms = await client.call("get_device_alarms")
                 data["alarms"] = alarms
+            except QueryBudgetError:
+                raise
             except Exception:
                 data["alarms"] = None
 
@@ -111,6 +151,8 @@ async def query_devices(
             insights.append("Primary training device identified")
         if data.get("solar_data"):
             insights.append("Solar charging data available")
+
+        reserve_projected_response_items("query_devices", data)
 
         return ResponseBuilder.build_response(
             data=data,

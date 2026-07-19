@@ -99,6 +99,16 @@ class GarminMutationInProgressError(GarminAPIError):
     public_code = "GARMIN_UPSTREAM_UNAVAILABLE"
 
 
+class GarminMutationPreDispatchError(GarminAPIError):
+    """A definite local or read failure before the first mutation dispatch."""
+
+
+class GarminInvalidIdempotencyKeyError(GarminAPIError):
+    """Reject malformed idempotency keys before authentication or dispatch."""
+
+    public_code = "VALIDATION_ERROR"
+
+
 @dataclass(frozen=True)
 class MutationOperation:
     """Least-privilege contract for one Garmin mutation method."""
@@ -106,6 +116,7 @@ class MutationOperation:
     capability: str
     method_name: str
     reconciliation: str
+    dependency_methods: frozenset[str] = frozenset()
 
 
 _IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
@@ -151,9 +162,10 @@ class MutationRegistry:
         method_args: tuple[Any, ...],
         method_kwargs: dict[str, Any],
         invoke: Callable[[], Any],
+        on_committed: Callable[[Any], None] | None = None,
     ) -> Any:
         """Execute once per capability/key and quarantine uncertain outcomes."""
-        _validate_idempotency_key(idempotency_key)
+        validate_idempotency_key(idempotency_key)
         record_key = hashlib.sha256(
             f"{operation.capability}\0{idempotency_key}".encode()
         ).hexdigest()
@@ -212,14 +224,17 @@ class MutationRegistry:
                     audit_key,
                 )
                 with self._lock:
-                    if (record_key, fingerprint) in self._results:
-                        return self._results[(record_key, fingerprint)]
-                return {
-                    "deduplicated": True,
-                    "message": (
-                        "A confirmed idempotency record exists; Garmin was not called again."
-                    ),
-                }
+                    result = self._results.get((record_key, fingerprint))
+                if result is None:
+                    result = {
+                        "deduplicated": True,
+                        "message": (
+                            "A confirmed idempotency record exists; Garmin was not called again."
+                        ),
+                    }
+                if on_committed is not None:
+                    on_committed(result)
+                return result
             if state == "unknown":
                 raise _unknown_outcome_error(operation, "unknown")
 
@@ -245,7 +260,7 @@ class MutationRegistry:
                 try:
                     self._remove_reservation(record_key, fingerprint)
                 except Exception as cleanup_error:
-                    raise GarminAPIError(
+                    raise GarminMutationOutcomeUnknownError(
                         "The mutation failed before a confirmed outcome, but its safety "
                         "reservation could not be cleared. Do not retry until the ledger "
                         "is repaired.",
@@ -259,6 +274,8 @@ class MutationRegistry:
                 raise _unknown_outcome_error(operation, "unknown", exc) from exc
             with self._lock:
                 self._results[(record_key, fingerprint)] = result
+            if on_committed is not None:
+                on_committed(result)
             logger.info(
                 "Garmin mutation succeeded capability=%s method=%s key=%s",
                 operation.capability,
@@ -304,6 +321,25 @@ class GarminReadClient:
             )
         return self._client.safe_call(method_name, *args, **kwargs)
 
+    def safe_call_with_preflight(
+        self,
+        method_name: str,
+        preflight: Callable[[], None],
+        *args,
+        **kwargs,
+    ) -> Any:
+        """Recheck a request after acquiring the shared session dispatch lock."""
+        if method_name not in self._allowed_methods:
+            raise GarminMethodNotAllowedError(
+                f"Garmin method '{method_name}' is not available through the read-only client."
+            )
+        return self._client.safe_call_with_preflight(
+            method_name,
+            preflight,
+            *args,
+            **kwargs,
+        )
+
 
 class GarminMutationClient:
     """Facade restricted to one enabled mutation capability and method."""
@@ -325,23 +361,184 @@ class GarminMutationClient:
         idempotency_key: str,
         **kwargs,
     ) -> Any:
+        return self._mutate(
+            method_name,
+            *args,
+            idempotency_key=idempotency_key,
+            dispatch_preflight=None,
+            **kwargs,
+        )
+
+    def mutate_with_preflight(
+        self,
+        method_name: str,
+        *args,
+        idempotency_key: str,
+        dispatch_preflight: Callable[[bool], None],
+        reserve_items: Callable[[int], None],
+        on_committed: Callable[[Any], None],
+        **kwargs,
+    ) -> Any:
+        """Recheck and mark the request at the exact remote dispatch boundary."""
+        return self._mutate(
+            method_name,
+            *args,
+            idempotency_key=idempotency_key,
+            dispatch_preflight=dispatch_preflight,
+            reserve_items=reserve_items,
+            on_committed=on_committed,
+            **kwargs,
+        )
+
+    def _mutate(
+        self,
+        method_name: str,
+        *args,
+        idempotency_key: str,
+        dispatch_preflight: Callable[[bool], None] | None,
+        reserve_items: Callable[[int], None] | None = None,
+        on_committed: Callable[[Any], None] | None = None,
+        **kwargs,
+    ) -> Any:
         if method_name != self._operation.method_name:
             raise GarminMethodNotAllowedError(
                 f"Garmin method '{method_name}' is not authorized by capability "
                 f"'{self._operation.capability}'."
             )
+
+        def invoke() -> Any:
+            return self._invoke_operation(
+                method_name,
+                args,
+                kwargs,
+                dispatch_preflight,
+                reserve_items,
+            )
+
         return self._registry.execute(
             self._operation,
             idempotency_key,
             args,
             kwargs,
-            lambda: self._client.safe_call(method_name, *args, **kwargs),
+            invoke,
+            on_committed=on_committed,
         )
 
+    def _invoke_operation(
+        self,
+        method_name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        dispatch_preflight: Callable[[bool], None] | None,
+        reserve_items: Callable[[int], None] | None,
+    ) -> Any:
+        if self._operation.capability == "weight.delete":
+            return self._delete_weight_entries_bounded(
+                args,
+                kwargs,
+                dispatch_preflight,
+                reserve_items,
+            )
+        if dispatch_preflight is None:
+            return self._client.safe_call(method_name, *args, **kwargs)
+        return self._client.safe_call_with_preflight(
+            method_name,
+            lambda: dispatch_preflight(True),
+            *args,
+            **kwargs,
+        )
 
-def _validate_idempotency_key(idempotency_key: str) -> None:
-    if not _IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
-        raise GarminAPIError(
+    def _delete_weight_entries_bounded(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        dispatch_preflight: Callable[[bool], None] | None,
+        reserve_items: Callable[[int], None] | None,
+    ) -> int | None:
+        """Expand date-wide deletion into one bounded read and direct deletes."""
+        try:
+            if len(args) != 2 or kwargs or args[1] is not True:
+                raise GarminAPIError("The bounded weight deletion request is invalid.")
+            cdate = args[0]
+            read_preflight = (
+                (lambda: dispatch_preflight(False)) if dispatch_preflight is not None else None
+            )
+            if read_preflight is None:
+                daily = self._client.safe_call("get_daily_weigh_ins", cdate)
+            else:
+                daily = self._client.safe_call_with_preflight(
+                    "get_daily_weigh_ins",
+                    read_preflight,
+                    cdate,
+                )
+            if not isinstance(daily, dict):
+                raise GarminAPIError("Garmin returned an invalid weigh-in collection.")
+            weigh_ins = daily.get("dateWeightList", [])
+            if not isinstance(weigh_ins, list):
+                raise GarminAPIError("Garmin returned an invalid weigh-in collection.")
+            if reserve_items is not None:
+                reserve_items(len(weigh_ins))
+            elif len(weigh_ins) > 10:
+                raise GarminAPIError(
+                    "The date contains too many weigh-ins for one bounded deletion."
+                )
+            if not weigh_ins:
+                return None
+
+            sample_ids: list[str] = []
+            for item in weigh_ins:
+                if not isinstance(item, dict) or not isinstance(item.get("samplePk"), (str, int)):
+                    raise GarminAPIError("Garmin returned an invalid weigh-in identifier.")
+                sample_ids.append(str(item["samplePk"]))
+        except Exception as exc:
+            from .query_budget import QueryBudgetError
+
+            if isinstance(
+                exc,
+                (
+                    QueryBudgetError,
+                    GarminAuthenticationError,
+                    GarminMethodNotAllowedError,
+                    GarminMethodUnavailableError,
+                    GarminNotFoundError,
+                    GarminRateLimitError,
+                ),
+            ):
+                raise
+            raise GarminMutationPreDispatchError(
+                "The bounded weight deletion failed before any delete was dispatched.",
+                original_error=exc,
+            ) from exc
+
+        completed = 0
+        try:
+            for sample_id in sample_ids:
+                if dispatch_preflight is None:
+                    self._client.safe_call("delete_weigh_in", sample_id, cdate)
+                else:
+                    self._client.safe_call_with_preflight(
+                        "delete_weigh_in",
+                        lambda: dispatch_preflight(True),
+                        sample_id,
+                        cdate,
+                    )
+                completed += 1
+        except Exception as exc:
+            if completed:
+                raise GarminMutationOutcomeUnknownError(
+                    "The date-wide deletion stopped after at least one confirmed delete. "
+                    "Reconcile the date before retrying."
+                ) from exc
+            raise
+        return completed
+
+
+def validate_idempotency_key(idempotency_key: object) -> None:
+    """Validate the public key contract without touching session state."""
+    if not isinstance(idempotency_key, str) or not _IDEMPOTENCY_KEY_PATTERN.fullmatch(
+        idempotency_key
+    ):
+        raise GarminInvalidIdempotencyKeyError(
             "idempotency_key must be 8-128 characters and contain only letters, "
             "numbers, '.', '_', ':', or '-'."
         )
@@ -363,6 +560,14 @@ def _mutation_fingerprint(
 
 
 def _is_ambiguous_mutation_error(error: Exception) -> bool:
+    # Resource-budget preflights run before the actual Garmin method invocation.
+    # Import lazily to avoid the client/query-budget module cycle at startup.
+    from .query_budget import QueryBudgetError
+
+    if isinstance(error, QueryBudgetError):
+        return False
+    if isinstance(error, GarminMutationPreDispatchError):
+        return False
     if isinstance(error, GarminMutationOutcomeUnknownError):
         return True
     if isinstance(
@@ -458,6 +663,25 @@ class GarminClientWrapper:
             GarminRateLimitError: Rate limit exceeded (429)
             GarminAPIError: Other API errors
         """
+        return self._safe_call(method_name, None, *args, **kwargs)
+
+    def safe_call_with_preflight(
+        self,
+        method_name: str,
+        preflight: Callable[[], None],
+        *args,
+        **kwargs,
+    ) -> Any:
+        """Invoke only if the owning request is active once the lock is held."""
+        return self._safe_call(method_name, preflight, *args, **kwargs)
+
+    def _safe_call(
+        self,
+        method_name: str,
+        dispatch_preflight: Callable[[], None] | None,
+        *args,
+        **kwargs,
+    ) -> Any:
         lock_context = self._lock or contextlib.nullcontext()
         try:
             with lock_context:
@@ -466,13 +690,15 @@ class GarminClientWrapper:
                     self._before_call()
                 self._assert_active()
                 try:
-                    try:
-                        method = getattr(self.client, method_name)
-                    except AttributeError as exc:
-                        raise GarminMethodUnavailableError(
-                            f"Method '{method_name}' not found on Garmin client",
-                            original_error=exc,
-                        ) from exc
+                    method = getattr(self.client, method_name)
+                except AttributeError as exc:
+                    raise GarminMethodUnavailableError(
+                        f"Method '{method_name}' not found on Garmin client",
+                        original_error=exc,
+                    ) from exc
+                if dispatch_preflight is not None:
+                    dispatch_preflight()
+                try:
                     result = method(*args, **kwargs)
                 except Exception:
                     self._run_after_call()
@@ -503,6 +729,14 @@ class GarminClientWrapper:
         except GarminAPIError:
             raise
         except Exception as e:
+            # This module cannot import query_budget at module load time because the
+            # budget layer imports the client facade. Preserve cooperative budget
+            # exceptions raised by the dispatch preflight instead of disguising them
+            # as an upstream Garmin failure.
+            from .query_budget import QueryBudgetError
+
+            if isinstance(e, QueryBudgetError):
+                raise
             raise GarminAPIError("Garmin returned an unexpected response.", original_error=e) from e
 
     def _run_after_call(self) -> None:

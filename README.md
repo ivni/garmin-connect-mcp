@@ -372,7 +372,127 @@ _Note: The athlete profile resource (`garmin://athlete/profile`) and daily healt
 "Show me my training readiness and recent stats"
 ```
 
-_Note: List-returning tools use cursor-based pagination with default limits (10 items for activities, 7 for health data)._
+_Note: List-returning tools use cursor-based pagination with default limits (20 items for activities, 7 days for health data)._
+
+### Request resource budgets
+
+Every tool and resource has a fixed server-side resource policy. Date ranges are inclusive and
+are validated before the authenticated Garmin client is requested. Future dates are allowed for
+compatibility, but count toward the same limit. Relative dates use the server's local timezone.
+
+| Surface | Inclusive range | Page / item ceiling | Calls | Response | Deadline | Partial |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `query_activities` | 366 days | 20 / 50 | 25 | 1 MiB | 30 s | Yes |
+| `get_activity_details` | N/A | 50 projected collection items | 7 | 1 MiB | 30 s | No |
+| `get_activity_social` | N/A | N/A | 1 | 1 MiB | 30 s | No |
+| `compare_activities` | N/A | 5 input activities | 5 | 1 MiB | 30 s | No |
+| `find_similar_activities` | N/A | 10 / 20 results | 2 | 1 MiB | 30 s | No |
+| `query_health_summary` | 366 days | 7 / 30 days | 100 | 1 MiB | 30 s | Yes |
+| `query_sleep_data` | 31 days | 7 / 31 days | 40 | 1 MiB | 30 s | Yes |
+| `query_heart_rate_data` | 31 days | 7 / 31 days | 70 | 1 MiB | 30 s | Yes |
+| `query_activity_metrics` | 31 days | 7 / 31 days; 1 day with range metrics | 100 | 1 MiB | 30 s | Yes |
+| `query_devices` | 31 solar days | 31 projected collection items | 8 | 1 MiB | 30 s | No |
+| `query_gear` | N/A | 50 projected collection items | 25 | 1 MiB | 30 s | No |
+| `get_user_profile` | N/A | 50 projected collection items | 8 | 1 MiB | 30 s | No |
+| `query_goals_and_records` | N/A | 50 projected collection items | 2 | 1 MiB | 30 s | No |
+| `query_challenges` | N/A | 50/category; 250 aggregate | 10 | 1 MiB | 30 s | No |
+| `analyze_training_period` | 366 days | 54 weekly; 108 aggregate | 25 | 1 MiB | 30 s | No |
+| `get_performance_metrics` | 366 days | 2,000 projected collection items | 10 | 1 MiB | 30 s | No |
+| `get_training_effect` | 366 days | 366 projected collection items | 5 | 1 MiB | 30 s | No |
+| `query_weight_data` | 366 days | 366 projected collection items | 5 | 1 MiB | 30 s | No |
+| `add_weight_entry` | N/A | N/A | 1 | 64 KiB | 30 s | No |
+| `delete_weight_entries` | N/A | 10 weigh-ins | 11 | 64 KiB | 30 s | No |
+| `query_workouts` | N/A | 20 / 50 workouts | 2 | 1 MiB | 30 s | Yes |
+| `upload_workout` | N/A | N/A | 1 | 64 KiB | 30 s | No |
+| `log_body_composition` | N/A | N/A | 1 | 64 KiB | 30 s | No |
+| `log_blood_pressure` | N/A | N/A | 1 | 64 KiB | 30 s | No |
+| `log_hydration` | N/A | N/A | 1 | 64 KiB | 30 s | No |
+| `query_womens_health` | 366 menstrual days | 366 projected collection items | 5 | 1 MiB | 30 s | No |
+| `garmin://athlete/profile` | N/A | 50 projected collection items | 4 | 1 MiB | 30 s | No |
+| `garmin://training/readiness` | N/A | 50 projected collection items | 2 | 1 MiB | 30 s | No |
+| `garmin://health/today` | N/A | 50 projected collection items | 2 | 1 MiB | 30 s | No |
+
+The call budget is a hard ceiling, not a promise that every option combination can fill the
+maximum page. For example, a health-summary day can require up to six Garmin calls, so an
+expensive 30-day page is rejected before its first call. All read responses have a 1 MiB
+serialized UTF-8 limit and a 30-second request deadline. Write responses have a 64 KiB limit and
+normally one remote-call budget. Date-wide weight deletion is expanded into one bounded lookup
+and at most ten direct deletes; it refuses a larger date before the first delete. The pinned
+Garmin dependency applies a 15-second timeout to each HTTP
+attempt. Blocking reads run in a dedicated pool capped at eight workers, and writes use a
+separate pool capped at two workers; queue wait counts toward the same request deadline.
+Cancellation or the MCP deadline prevents any subsequent Garmin read even though Python cannot
+forcibly stop an already running worker thread. If a submitted write does not confirm before
+cancellation or the deadline, its Garmin outcome must be treated as unknown and requires
+reconciliation before a retry with the same `idempotency_key`; external task cancellation itself
+continues to propagate to the MCP host.
+
+`query_activity_metrics` uses one-day pages when `blood_pressure` or
+`body_composition` is requested for a range. Those Garmin methods return an aggregate window;
+the one-day page guarantees that the range payload, metadata, and cursor cover the same dates.
+Pass `limit=1` on those requests, or omit `limit` and reuse the returned cursor.
+
+`garminconnect==0.3.6` internally auto-pages goals until an empty response and exposes earned
+badges only as an unbounded collection. Those two sub-capabilities are returned as unavailable
+instead of bypassing the MCP call/item budgets. Other challenge categories and workout lists use
+bounded cursor pages.
+
+The pinned adhoc-challenge method exposes historical challenges rather than an active or
+available feed. `query_challenges` therefore calls it only for `status="all"`; for narrower
+statuses the `adhoc_challenges` category is explicitly reported as unavailable.
+
+Challenge categories use synchronized ordinary cursor pages: `has_more` and `cursor` mean that
+another page exists, not that the current page is an error-tolerant partial result. This is logged
+as `continuation=true`, separately from truncation. If the synchronized category payload cannot
+fit the byte ceiling, the request fails closed instead of inventing a cursor that could skip a
+category.
+
+Some dependency methods return an entire range in one unpaged call. For device collections and
+solar data, performance metrics, training progress, weight, and women's-health data, the date
+ceiling bounds the upstream query and the projected public collections are then checked against
+the table's aggregate item ceiling. An oversized collection fails closed with
+`ITEM_BUDGET_EXCEEDED`; there is no continuation cursor because the pinned dependency exposes no
+bounded page for those methods.
+
+There are intentionally no environment-variable overrides for resource budgets. A host operator
+cannot raise these public ceilings without changing, reviewing, and testing the policy registry.
+
+Paginated responses use an opaque, versioned cursor bound to the exact surface, filters, page
+size, and policy version. Reuse the original arguments with the returned cursor; changing a
+filter or page size returns `INVALID_CONTINUATION_CURSOR`. The cursor is strictly validated but
+unsigned because modifying it cannot raise any server-side range, item, call, deadline, or byte
+limit.
+
+When a surface whose table entry permits partial results stops at a normal page, scan-call, or
+byte boundary, pagination contains
+`partial=true`, a safe `truncation_reason`, the returned item count, and a cursor to the first
+unreturned item. If one item cannot fit by itself, the response is
+`RESPONSE_BUDGET_EXCEEDED`. Authentication, rate-limit, dependency, deadline, and cancellation
+failures return a stable error rather than mixing an error with partial health data. The final
+middleware guard replaces any oversized tool payload with the same bounded error.
+After Garmin confirms a mutation, a late byte overflow or other response-delivery failure instead
+returns a compact confirmed-success acknowledgement; it never replaces the confirmed write with a
+retry-facing error.
+
+Activity pagination uses Garmin's offset feed, which has no snapshot token. Its cursor fixes the
+query end and all filters, but consistency remains weak if the upstream feed changes between
+pages: newly inserted or deleted activities can shift later offsets. Consumers that require a
+stable historical snapshot should complete pages without delay and de-duplicate by activity ID.
+
+Common budget errors are `INVALID_DATE_RANGE`, `RANGE_TOO_LARGE`, `INVALID_PAGE_SIZE`,
+`API_CALL_BUDGET_EXCEEDED`, `ITEM_BUDGET_EXCEEDED`, `RESPONSE_BUDGET_EXCEEDED`,
+`REQUEST_DEADLINE_EXCEEDED`, and `INVALID_CONTINUATION_CURSOR`. Error payloads contain no Garmin
+response body, health value, device identifier, credential, or raw exception text.
+
+Example request shapes:
+
+```text
+query_activities(start_date="2026-06-01", end_date="2026-06-30", limit=20)
+query_sleep_data(start_date="2026-06-01", end_date="2026-07-01", limit=7)
+query_health_summary(start_date="2025-07-20", end_date="2026-07-19", limit=7)
+```
+
+If `pagination.has_more` is true, repeat the same call with the returned `pagination.cursor`.
 
 ### Response privacy
 
@@ -506,7 +626,7 @@ Prompt templates for common queries (accessible via prompt suggestion in Claude)
 Run the complete locked quality gate locally with:
 
 ```bash
-make qa
+uv run --locked scripts/qa.py
 ```
 
 The gate includes linting, formatting, type checking, tests, and dependency auditing. Run only

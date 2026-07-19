@@ -30,7 +30,9 @@ def parse_time_range(period: str) -> tuple[datetime, datetime]:
     if period.endswith("d"):
         try:
             days = int(period[:-1])
-            start_date = today - timedelta(days=days)
+            if days <= 0:
+                raise ValueError("Relative period must contain at least one day")
+            start_date = today - timedelta(days=days - 1)
             end_date = today
             return start_date, end_date
         except ValueError as e:

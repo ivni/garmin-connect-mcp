@@ -5,6 +5,7 @@ from typing import Annotated, Any
 from fastmcp import Context
 
 from ..client import GarminAPIError
+from ..query_budget import QueryBudgetError, reserve_projected_response_items
 from ..response_builder import ResponseBuilder
 from ..types import UnitSystem
 
@@ -52,10 +53,12 @@ async def compare_activities(
         activities = []
         for activity_id in ids:
             try:
-                activity = client.safe_call("get_activity", activity_id)
+                activity = await client.call("get_activity", activity_id)
                 if activity:
                     formatted_activity = ResponseBuilder.format_activity(activity, unit)
                     activities.append(formatted_activity)
+            except QueryBudgetError:
+                raise
             except Exception:
                 # Skip activities that can't be fetched
                 pass
@@ -235,13 +238,17 @@ async def compare_activities(
                 if dist_diff_percent < 10:
                     insights.append("Similar distance across all activities")
 
+        data = {"activities": activities, "comparison": comparison, "count": len(activities)}
+        reserve_projected_response_items("compare_activities", data)
         return ResponseBuilder.build_response(
-            data={"activities": activities, "comparison": comparison, "count": len(activities)},
+            data=data,
             analysis={"insights": insights},
             metadata={"activity_ids": ids, "unit": unit},
             surface="compare_activities",
         )
 
+    except QueryBudgetError as exc:
+        return ResponseBuilder.build_budget_error_response(exc)
     except GarminAPIError as e:
         return ResponseBuilder.build_exception_response(e)
     except Exception as e:
@@ -306,7 +313,7 @@ async def find_similar_activities(
             )
 
         # Fetch reference activity
-        ref_activity = client.safe_call("get_activity", activity_id)
+        ref_activity = await client.call("get_activity", activity_id)
         if not ref_activity:
             return ResponseBuilder.build_error_response(
                 f"Reference activity {activity_id} not found",
@@ -325,7 +332,7 @@ async def find_similar_activities(
 
         # Fetch recent activities to search through
         # We'll fetch the last 100 activities as candidates
-        candidate_activities = client.safe_call("get_activities", 0, 100, "")
+        candidate_activities = await client.call("get_activities", 0, 100, "")
 
         if not candidate_activities:
             return ResponseBuilder.build_response(
@@ -453,12 +460,14 @@ async def find_similar_activities(
         else:
             insights.append("No similar activities found matching the criteria")
 
+        data = {
+            "reference_activity": ResponseBuilder.format_activity(ref_activity, unit),
+            "similar_activities": similar,
+            "count": len(similar),
+        }
+        reserve_projected_response_items("find_similar_activities", data)
         return ResponseBuilder.build_response(
-            data={
-                "reference_activity": ResponseBuilder.format_activity(ref_activity, unit),
-                "similar_activities": similar,
-                "count": len(similar),
-            },
+            data=data,
             analysis={"insights": insights},
             metadata={
                 "reference_activity_id": activity_id,
@@ -469,6 +478,8 @@ async def find_similar_activities(
             surface="find_similar_activities",
         )
 
+    except QueryBudgetError as exc:
+        return ResponseBuilder.build_budget_error_response(exc)
     except GarminAPIError as e:
         return ResponseBuilder.build_exception_response(e)
     except Exception as e:

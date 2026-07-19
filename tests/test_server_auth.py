@@ -9,6 +9,7 @@ import pytest
 import garmin_connect_mcp.session as session_module
 from garmin_connect_mcp import server
 from garmin_connect_mcp.client import GarminAuthenticationError
+from garmin_connect_mcp.response_builder import ResponseBuilder
 
 
 class FakeWrapper:
@@ -29,8 +30,10 @@ class FakeManager:
         self.error = error
         self.calls = 0
 
-    def get_read_client(self):
+    def get_read_client(self, preflight=None):
         self.calls += 1
+        if preflight is not None:
+            preflight()
         if self.error:
             raise self.error
         return self.client
@@ -52,7 +55,8 @@ async def test_resource_uses_shared_session_manager(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_resource_returns_shared_auth_error(monkeypatch):
+async def test_resource_returns_shared_auth_error(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="garmin_connect_mcp.query_budget")
     manager = FakeManager(error=GarminAuthenticationError("token missing"))
     monkeypatch.setattr(session_module, "get_session_manager", lambda: manager)
 
@@ -64,6 +68,51 @@ async def test_resource_returns_shared_auth_error(monkeypatch):
     assert payload["error"]["message"] == (
         "Garmin authentication is required. Run 'garmin-connect-mcp auth'."
     )
+    actual_size = ResponseBuilder.serialized_envelope_size(result, "garmin://health/today")
+    assert f"response_bytes={actual_size}" in caplog.messages[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("readiness", "expected_code"),
+    [
+        ([{"calendarDate": "2026-07-19"}] * 51, "ITEM_BUDGET_EXCEEDED"),
+        (
+            [{"calendarDate": "2026-07-19", "trainingReadinessScore": "x" * (1024 * 1024)}],
+            "RESPONSE_BUDGET_EXCEEDED",
+        ),
+    ],
+)
+async def test_resource_budget_errors_log_the_actual_returned_envelope(
+    monkeypatch,
+    caplog,
+    readiness,
+    expected_code,
+):
+    caplog.set_level("INFO", logger="garmin_connect_mcp.query_budget")
+
+    class ReadinessWrapper(FakeWrapper):
+        def safe_call(self, method_name, *args):
+            self.calls.append((method_name, args))
+            return readiness
+
+    monkeypatch.setattr(
+        session_module,
+        "get_session_manager",
+        lambda: FakeManager(ReadinessWrapper()),
+    )
+    monkeypatch.setattr(server, "get_today_date_string", lambda: "2026-07-19")
+
+    result = await server.training_readiness_resource()
+    payload = json.loads(result)
+
+    assert payload["error"]["code"] == expected_code
+    actual_size = ResponseBuilder.serialized_envelope_size(
+        result,
+        "garmin://training/readiness",
+    )
+    assert f"response_bytes={actual_size}" in caplog.messages[-1]
+    assert f"outcome={expected_code}" in caplog.messages[-1]
 
 
 @pytest.mark.asyncio

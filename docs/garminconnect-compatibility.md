@@ -18,7 +18,7 @@ tools and resources.
 
 | MCP surface | Kind | garminconnect 0.3.6 methods | Status |
 | --- | --- | --- | --- |
-| `query_activities` | Tool | `get_activities_by_date`, `get_activities`, `get_activity`, `get_last_activity` | Supported |
+| `query_activities` | Tool | `get_activities`, `get_activity`, `get_last_activity` | Supported |
 | `get_activity_details` | Tool | `get_activity`, `get_activity_splits`, `get_activity_details`, `get_activity_weather`, `get_activity_hr_in_timezones`, `get_activity_gear`, `get_activity_exercise_sets` | Supported |
 | `get_activity_social` | Tool | None | Unavailable; returns `capability_unavailable` |
 | `compare_activities` | Tool | `get_activity` | Supported |
@@ -30,15 +30,15 @@ tools and resources.
 | `query_devices` | Tool | `get_devices`, `get_device_last_used`, `get_primary_training_device`, `get_device_settings`, `get_device_solar_data`, `get_device_alarms` | Supported |
 | `query_gear` | Tool | `get_gear`, `get_gear_defaults`, `get_gear_stats` | Supported with explicit profile number and gear UUID for stats |
 | `get_user_profile` | Tool | `get_full_name`, `get_user_profile`, `get_stats`, `get_user_summary`, `get_personal_record`, `get_devices`, `get_primary_training_device` | Supported |
-| `query_goals_and_records` | Tool | `get_goals`, `get_personal_record`, `get_race_predictions` | Supported |
-| `query_challenges` | Tool | `get_available_badge_challenges`, `get_non_completed_badge_challenges`, `get_earned_badges`, `get_badge_challenges`, `get_adhoc_challenges`, `get_inprogress_virtual_challenges` | Supported with bounded page arguments |
-| `analyze_training_period` | Tool | `get_activities_by_date` | Supported |
+| `query_goals_and_records` | Tool | `get_personal_record`, `get_race_predictions` | Records and predictions supported; goals unavailable because dependency 0.3.6 auto-pages internally without a bound |
+| `query_challenges` | Tool | `get_available_badge_challenges`, `get_non_completed_badge_challenges`, `get_badge_challenges`, `get_adhoc_challenges`, `get_inprogress_virtual_challenges` | Supported with 1-50 item category pages; earned badges are unavailable, and historical adhoc challenges are available only for `status="all"` |
+| `analyze_training_period` | Tool | `get_activities` | Supported |
 | `get_performance_metrics` | Tool | `get_max_metrics`, `get_hrv_data`, `get_fitnessage_data`, `get_hill_score`, `get_endurance_score` | Supported |
 | `get_training_effect` | Tool | `get_activity`, `get_progress_summary_between_dates` | Supported; activity effect fields come from the activity summary |
 | `query_weight_data` | Tool | `get_daily_weigh_ins`, `get_weigh_ins` | Supported |
 | `add_weight_entry` | Tool | `add_weigh_in(weight, "kg", local_timestamp)` | Supported, default-off write |
-| `delete_weight_entries` | Tool | `delete_weigh_ins(date, true)` | Supported, default-off destructive write |
-| `query_workouts` | Tool | `get_workouts`, `get_workout_by_id`, `download_workout` | Supported |
+| `delete_weight_entries` | Tool | logical `delete_weigh_ins(date, true)` facade, implemented with `get_daily_weigh_ins(date)` plus up to ten `delete_weigh_in(id, date)` calls | Supported, default-off destructive write; refuses larger dates before the first delete |
+| `query_workouts` | Tool | `get_workouts`, `get_workout_by_id`, `download_workout` | Supported; lists use 1-50 item cursor pages and oversized FIT files are rejected before Base64 expansion |
 | `upload_workout` | Tool | `upload_workout` | Supported, default-off write |
 | `log_body_composition` | Tool | `add_body_composition(timestamp=..., weight=..., percent_fat=..., percent_hydration=...)` | Supported, default-off write |
 | `log_blood_pressure` | Tool | `set_blood_pressure(systolic, diastolic, pulse, timestamp)` | Supported, default-off write |
@@ -48,7 +48,8 @@ tools and resources.
 | `garmin://training/readiness` | Resource | `get_training_readiness(date)` | Supported |
 | `garmin://health/today` | Resource | `get_stats(date)` | Supported |
 
-The exact call samples and return shapes (`object`, `array`, `string`, `number`, `null`, or `binary`)
+The exact call samples and return shapes (`object`, `array`, `string`, `number`, `null`, `binary`,
+or `unknown` where the dependency annotation is `Any`)
 live in the executable matrix so documentation cannot substitute for CI enforcement.
 
 ## Public response shape
@@ -82,3 +83,5 @@ location opt-in, stable error codes, and schema-1 migration notes.
 - Binary FIT download content remains an explicitly requested workout result.
   Only its Base64 content, media type, encoding, size, and SHA-256 digest cross
   the public response boundary.
+- `get_goals` and `get_earned_badges` are intentionally excluded from the read facade: the
+  pinned dependency cannot enforce a single bounded page for those methods.

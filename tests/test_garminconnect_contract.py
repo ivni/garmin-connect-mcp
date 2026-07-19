@@ -26,6 +26,7 @@ SOURCE_ROOT = PROJECT_ROOT / "src" / "garmin_connect_mcp"
 CallShape = tuple[str, int, frozenset[str]]
 
 SOURCE_FUNCTION_SURFACES = {
+    ("client.py", "_delete_weight_entries_bounded"): "delete_weight_entries",
     ("server.py", "athlete_profile_resource"): "garmin://athlete/profile",
     ("server.py", "training_readiness_resource"): "garmin://training/readiness",
     ("server.py", "health_today_resource"): "garmin://health/today",
@@ -35,6 +36,8 @@ SOURCE_FUNCTION_SURFACES = {
 
 
 def _return_shapes(annotation: Any) -> frozenset[str]:
+    if annotation is Any:
+        return frozenset({"unknown"})
     origin = get_origin(annotation)
     if origin in {types.UnionType, Union}:
         return frozenset().union(*(_return_shapes(item) for item in get_args(annotation)))
@@ -142,18 +145,27 @@ def _source_call_shapes() -> dict[str, set[CallShape]]:
         def _dependency_shape(self, node: ast.Call) -> CallShape | None:
             if (
                 isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"safe_call", "mutate"}
+                and node.func.attr in {"safe_call", "call", "mutate"}
                 and node.args
             ):
                 if not (
                     isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
                 ):
                     allowed_dynamic_dispatch = (
-                        self.relative_path == "client.py"
-                        and self.functions[-1] in {"safe_call", "mutate"}
-                    ) or (
-                        self.relative_path == "tools/data_management.py"
-                        and self.functions[-1] == "_execute_health_write"
+                        (
+                            self.relative_path == "client.py"
+                            and self.functions[-1]
+                            in {"safe_call", "mutate", "_mutate", "_invoke_operation"}
+                        )
+                        or (
+                            self.relative_path == "query_budget.py"
+                            and self.functions[-1]
+                            in {"safe_call", "call", "mutate", "_dispatch", "_invoke"}
+                        )
+                        or (
+                            self.relative_path == "tools/data_management.py"
+                            and self.functions[-1] == "_execute_health_write"
+                        )
                     )
                     assert allowed_dynamic_dispatch, (
                         "MCP dependency methods must remain literal so source-contract drift "
@@ -197,7 +209,11 @@ def _source_call_shapes() -> dict[str, set[CallShape]]:
 
 
 def test_actual_source_dispatch_shapes_match_and_bind_to_each_surface_contract():
-    mutation_methods = frozenset(operation.method_name for operation in MUTATION_TOOLS.values())
+    mutation_methods = frozenset(
+        method
+        for operation in MUTATION_TOOLS.values()
+        for method in ({operation.method_name} | operation.dependency_methods)
+    )
     assert dependency_methods() - mutation_methods == READ_METHODS
 
     actual = _source_call_shapes()
@@ -215,3 +231,8 @@ def test_actual_source_dispatch_shapes_match_and_bind_to_each_surface_contract()
                 *(object() for _ in range(positional_count)),
                 **{name: object() for name in keyword_names},
             )
+
+
+def test_unbounded_dependency_collections_are_not_exposed_by_the_read_facade():
+    assert "get_goals" not in READ_METHODS
+    assert "get_earned_badges" not in READ_METHODS

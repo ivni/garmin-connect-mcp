@@ -3,6 +3,7 @@
 from fastmcp import Context
 
 from ..client import GarminAPIError
+from ..query_budget import QueryBudgetError, reserve_projected_response_items
 from ..response_builder import ResponseBuilder
 from ..time_utils import get_today_date_string
 
@@ -29,8 +30,8 @@ async def get_user_profile(
         client = await ctx.get_state("client")
 
         # Get basic profile info
-        full_name = client.safe_call("get_full_name")
-        profile = client.safe_call("get_user_profile")
+        full_name = await client.call("get_full_name")
+        profile = await client.call("get_user_profile")
 
         data = {
             "profile": {
@@ -43,38 +44,48 @@ async def get_user_profile(
         if include_stats:
             today = get_today_date_string()
             try:
-                stats = client.safe_call("get_stats", today)
+                stats = await client.call("get_stats", today)
                 data["stats"] = stats
+            except QueryBudgetError:
+                raise
             except Exception:
                 data["stats"] = None
 
             try:
-                user_summary = client.safe_call("get_user_summary", today)
+                user_summary = await client.call("get_user_summary", today)
                 data["user_summary"] = user_summary
+            except QueryBudgetError:
+                raise
             except Exception:
                 data["user_summary"] = None
 
         # Add personal records
         if include_prs:
             try:
-                prs = client.safe_call("get_personal_record")
+                prs = await client.call("get_personal_record")
                 data["personal_records"] = prs
+            except QueryBudgetError:
+                raise
             except Exception:
                 data["personal_records"] = None
 
         # Add device information
         if include_devices:
             try:
-                devices = client.safe_call("get_devices")
+                devices = await client.call("get_devices")
                 data["devices"] = devices
 
                 # Add primary device
                 try:
-                    primary_device = client.safe_call("get_primary_training_device")
+                    primary_device = await client.call("get_primary_training_device")
                     data["primary_device"] = primary_device
+                except QueryBudgetError:
+                    raise
                 except Exception:
                     data["primary_device"] = None
 
+            except QueryBudgetError:
+                raise
             except Exception:
                 data["devices"] = None
                 data["primary_device"] = None
@@ -104,6 +115,7 @@ async def get_user_profile(
             "include_devices": include_devices,
         }
 
+        reserve_projected_response_items("get_user_profile", data)
         return ResponseBuilder.build_response(
             data=data,
             analysis=analysis,
@@ -111,6 +123,8 @@ async def get_user_profile(
             surface="get_user_profile",
         )
 
+    except QueryBudgetError as exc:
+        return ResponseBuilder.build_budget_error_response(exc)
     except GarminAPIError as e:
         return ResponseBuilder.build_exception_response(e)
     except Exception as e:

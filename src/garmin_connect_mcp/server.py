@@ -255,31 +255,46 @@ mcp.tool(
 )
 async def athlete_profile_resource() -> str:
     """Provide athlete profile with stats and zones for context-aware clients."""
-    # Resources don't go through middleware, so use the same shared manager directly.
+    # Resource reads own their client budget locally; tool client injection does not apply.
+    from .query_budget import (
+        BudgetedGarminReadClient,
+        request_budget_scope,
+        reserve_projected_response_items,
+    )
     from .response_builder import ResponseBuilder
     from .session import get_session_manager
 
-    try:
-        wrapper = get_session_manager().get_read_client()
-        full_name = wrapper.safe_call("get_full_name")
-        unit_system = wrapper.safe_call("get_unit_system")
+    surface = "garmin://athlete/profile"
+    with request_budget_scope(surface) as budget:
+        try:
+            wrapper = BudgetedGarminReadClient.lazy(
+                lambda: get_session_manager().get_read_client(budget.ensure_active),
+                budget,
+            )
+            full_name = await wrapper.call("get_full_name")
+            unit_system = await wrapper.call("get_unit_system")
 
-        # Garmin 0.3.6 requires an explicit ISO calendar date for both calls.
-        today = get_today_date_string()
-        user_summary = wrapper.safe_call("get_user_summary", today)
-        daily_stats = wrapper.safe_call("get_stats", today)
+            # Garmin 0.3.6 requires an explicit ISO calendar date for both calls.
+            today = get_today_date_string()
+            user_summary = await wrapper.call("get_user_summary", today)
+            daily_stats = await wrapper.call("get_stats", today)
 
-        return ResponseBuilder.build_response(
-            data={
+            resource_data = {
                 "profile": {"name": full_name, "unit_system": unit_system},
                 "summary": user_summary,
                 "stats": daily_stats,
-            },
-            metadata={"resource": "athlete_profile", "date": today},
-            surface="garmin://athlete/profile",
-        )
-    except Exception as exc:
-        return ResponseBuilder.build_exception_response(exc)
+            }
+            reserve_projected_response_items(surface, resource_data)
+            response = ResponseBuilder.build_response(
+                data=resource_data,
+                metadata={"resource": "athlete_profile", "date": today},
+                surface=surface,
+            )
+            budget.ensure_active()
+        except Exception as exc:
+            response = ResponseBuilder.build_exception_response(exc)
+        budget.record_response_size(ResponseBuilder.serialized_envelope_size(response, surface))
+        return response
 
 
 @mcp.resource(
@@ -290,21 +305,36 @@ async def athlete_profile_resource() -> str:
 )
 async def training_readiness_resource() -> str:
     """Provide current training readiness, Body Battery, and recovery status."""
+    from .query_budget import (
+        BudgetedGarminReadClient,
+        request_budget_scope,
+        reserve_projected_response_items,
+    )
     from .response_builder import ResponseBuilder
     from .session import get_session_manager
 
-    try:
-        wrapper = get_session_manager().get_read_client()
-        today = get_today_date_string()
-        readiness = wrapper.safe_call("get_training_readiness", today)
+    surface = "garmin://training/readiness"
+    with request_budget_scope(surface) as budget:
+        try:
+            wrapper = BudgetedGarminReadClient.lazy(
+                lambda: get_session_manager().get_read_client(budget.ensure_active),
+                budget,
+            )
+            today = get_today_date_string()
+            readiness = await wrapper.call("get_training_readiness", today)
 
-        return ResponseBuilder.build_response(
-            data={"readiness": readiness},
-            metadata={"resource": "training_readiness", "date": today},
-            surface="garmin://training/readiness",
-        )
-    except Exception as exc:
-        return ResponseBuilder.build_exception_response(exc)
+            resource_data = {"readiness": readiness}
+            reserve_projected_response_items(surface, resource_data)
+            response = ResponseBuilder.build_response(
+                data=resource_data,
+                metadata={"resource": "training_readiness", "date": today},
+                surface=surface,
+            )
+            budget.ensure_active()
+        except Exception as exc:
+            response = ResponseBuilder.build_exception_response(exc)
+        budget.record_response_size(ResponseBuilder.serialized_envelope_size(response, surface))
+        return response
 
 
 @mcp.resource(
@@ -315,21 +345,36 @@ async def training_readiness_resource() -> str:
 )
 async def health_today_resource() -> str:
     """Provide today's health snapshot (steps, sleep, stress, HR)."""
+    from .query_budget import (
+        BudgetedGarminReadClient,
+        request_budget_scope,
+        reserve_projected_response_items,
+    )
     from .response_builder import ResponseBuilder
     from .session import get_session_manager
 
-    try:
-        wrapper = get_session_manager().get_read_client()
-        today = get_today_date_string()
-        daily_stats = wrapper.safe_call("get_stats", today)
+    surface = "garmin://health/today"
+    with request_budget_scope(surface) as budget:
+        try:
+            wrapper = BudgetedGarminReadClient.lazy(
+                lambda: get_session_manager().get_read_client(budget.ensure_active),
+                budget,
+            )
+            today = get_today_date_string()
+            daily_stats = await wrapper.call("get_stats", today)
 
-        return ResponseBuilder.build_response(
-            data={"health": daily_stats},
-            metadata={"resource": "health_today", "date": today},
-            surface="garmin://health/today",
-        )
-    except Exception as exc:
-        return ResponseBuilder.build_exception_response(exc)
+            resource_data = {"health": daily_stats}
+            reserve_projected_response_items(surface, resource_data)
+            response = ResponseBuilder.build_response(
+                data=resource_data,
+                metadata={"resource": "health_today", "date": today},
+                surface=surface,
+            )
+            budget.ensure_active()
+        except Exception as exc:
+            response = ResponseBuilder.build_exception_response(exc)
+        budget.record_response_size(ResponseBuilder.serialized_envelope_size(response, surface))
+        return response
 
 
 # ============================================================================

@@ -68,7 +68,6 @@ COMPATIBILITY_MATRIX: dict[str, SurfaceContract] = {
     "query_activities": SurfaceContract(
         "tool",
         (
-            _call("get_activities_by_date", "2026-07-01", "2026-07-19", None, returns=A),
             _call("get_activities", 0, 20, None, returns=OA),
             _call("get_activity", 123, returns=O),
             _call("get_last_activity", returns=ON),
@@ -170,7 +169,6 @@ COMPATIBILITY_MATRIX: dict[str, SurfaceContract] = {
     "query_goals_and_records": SurfaceContract(
         "tool",
         (
-            _call("get_goals", returns=A),
             _call("get_personal_record", returns=O),
             _call("get_race_predictions", returns=O),
         ),
@@ -178,17 +176,16 @@ COMPATIBILITY_MATRIX: dict[str, SurfaceContract] = {
     "query_challenges": SurfaceContract(
         "tool",
         (
-            _call("get_available_badge_challenges", 0, 100, returns=O),
-            _call("get_non_completed_badge_challenges", 0, 100, returns=O),
-            _call("get_earned_badges", returns=A),
-            _call("get_badge_challenges", 0, 100, returns=O),
-            _call("get_adhoc_challenges", 0, 100, returns=O),
-            _call("get_inprogress_virtual_challenges", 1, 100, returns=O),
+            _call("get_available_badge_challenges", 0, 51, returns=O),
+            _call("get_non_completed_badge_challenges", 0, 51, returns=O),
+            _call("get_badge_challenges", 0, 51, returns=O),
+            _call("get_adhoc_challenges", 0, 51, returns=O),
+            _call("get_inprogress_virtual_challenges", 1, 51, returns=O),
         ),
     ),
     "analyze_training_period": SurfaceContract(
         "tool",
-        (_call("get_activities_by_date", "2026-07-01", "2026-07-19", None, returns=A),),
+        (_call("get_activities", 0, 50, None, returns=OA),),
     ),
     "get_performance_metrics": SurfaceContract(
         "tool",
@@ -225,12 +222,17 @@ COMPATIBILITY_MATRIX: dict[str, SurfaceContract] = {
         (_call("add_weigh_in", 75.0, "kg", "2026-07-19T12:00:00", returns=ON),),
     ),
     "delete_weight_entries": SurfaceContract(
-        "tool", (_call("delete_weigh_ins", "2026-07-19", True, returns=("number", "null")),)
+        "tool",
+        (
+            _call("delete_weigh_ins", "2026-07-19", True, returns=("number", "null")),
+            _call("get_daily_weigh_ins", "2026-07-19", returns=O),
+            _call("delete_weigh_in", "123", "2026-07-19", returns=("unknown",)),
+        ),
     ),
     "query_workouts": SurfaceContract(
         "tool",
         (
-            _call("get_workouts", returns=A),
+            _call("get_workouts", 0, 51, returns=A),
             _call("get_workout_by_id", 123, returns=O),
             _call("download_workout", 123, returns=("binary",)),
         ),

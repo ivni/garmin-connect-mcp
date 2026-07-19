@@ -13,7 +13,6 @@ READ_METHODS = frozenset(
     {
         "download_workout",
         "get_activities",
-        "get_activities_by_date",
         "get_activity",
         "get_activity_details",
         "get_activity_exercise_sets",
@@ -34,7 +33,6 @@ READ_METHODS = frozenset(
         "get_device_settings",
         "get_device_solar_data",
         "get_devices",
-        "get_earned_badges",
         "get_endurance_score",
         "get_fitnessage_data",
         "get_floors",
@@ -42,7 +40,6 @@ READ_METHODS = frozenset(
         "get_gear",
         "get_gear_defaults",
         "get_gear_stats",
-        "get_goals",
         "get_heart_rates",
         "get_hill_score",
         "get_hrv_data",
@@ -92,6 +89,7 @@ MUTATION_TOOLS = {
             "query all weight data for the target date and verify whether any weigh-ins remain "
             "before attempting another date-wide deletion"
         ),
+        dependency_methods=frozenset({"delete_weigh_ins", "delete_weigh_in"}),
     ),
     "upload_workout": MutationOperation(
         capability="workouts.upload",
