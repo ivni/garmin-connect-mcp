@@ -6,6 +6,7 @@ from fastmcp import Context
 
 from ..client import GarminAPIError
 from ..response_builder import ResponseBuilder
+from ..time_utils import parse_date_string
 
 
 async def query_devices(
@@ -14,6 +15,10 @@ async def query_devices(
     include_primary: Annotated[bool, "Include primary training device"] = True,
     include_settings: Annotated[bool, "Include device settings"] = False,
     include_solar_data: Annotated[bool, "Include solar charging data"] = False,
+    solar_start_date: Annotated[
+        str | None, "Solar range start ('today', 'yesterday', or YYYY-MM-DD)"
+    ] = None,
+    solar_end_date: Annotated[str | None, "Solar range end (YYYY-MM-DD)"] = None,
     include_alarms: Annotated[bool, "Include device alarms"] = False,
     ctx: Context | None = None,
 ) -> str:
@@ -23,6 +28,27 @@ async def query_devices(
     Get comprehensive device information including last used device,
     primary training device, settings, solar data, and alarms.
     """
+    if device_id is not None and device_id <= 0:
+        return ResponseBuilder.build_error_response(
+            "device_id must be positive", "invalid_parameters"
+        )
+    if include_solar_data and device_id is None:
+        return ResponseBuilder.build_error_response(
+            "device_id is required when include_solar_data is true",
+            "invalid_parameters",
+        )
+
+    try:
+        solar_start = parse_date_string(solar_start_date or "today").strftime("%Y-%m-%d")
+        solar_end = parse_date_string(solar_end_date or solar_start).strftime("%Y-%m-%d")
+    except ValueError as exc:
+        return ResponseBuilder.build_error_response(str(exc), "invalid_parameters")
+    if solar_start > solar_end:
+        return ResponseBuilder.build_error_response(
+            "solar_start_date must be before or equal to solar_end_date",
+            "invalid_parameters",
+        )
+
     assert ctx is not None
     try:
         client = await ctx.get_state("client")
@@ -63,17 +89,19 @@ async def query_devices(
 
             if include_solar_data:
                 try:
-                    solar = client.safe_call("get_device_solar_data", device_id)
+                    solar = client.safe_call(
+                        "get_device_solar_data", device_id, solar_start, solar_end
+                    )
                     data["solar_data"] = solar
                 except Exception:
                     data["solar_data"] = None
 
-            if include_alarms:
-                try:
-                    alarms = client.safe_call("get_device_alarms", device_id)
-                    data["alarms"] = alarms
-                except Exception:
-                    data["alarms"] = None
+        if include_alarms:
+            try:
+                alarms = client.safe_call("get_device_alarms")
+                data["alarms"] = alarms
+            except Exception:
+                data["alarms"] = None
 
         # Generate insights
         insights = []
@@ -87,7 +115,11 @@ async def query_devices(
         return ResponseBuilder.build_response(
             data=data,
             analysis={"insights": insights} if insights else None,
-            metadata={"device_id": device_id},
+            metadata={
+                "device_id": device_id,
+                "solar_start_date": solar_start if include_solar_data else None,
+                "solar_end_date": solar_end if include_solar_data else None,
+            },
         )
 
     except GarminAPIError as e:

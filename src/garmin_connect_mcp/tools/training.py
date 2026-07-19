@@ -1,7 +1,6 @@
 """Training and performance tools for Garmin Connect MCP server."""
 
 from collections import defaultdict
-from datetime import datetime
 from typing import Annotated, Any
 
 from fastmcp import Context
@@ -11,6 +10,7 @@ from ..response_builder import ResponseBuilder
 from ..time_utils import (
     format_date_for_api,
     get_range_description,
+    get_today_date_string,
     get_week_ranges,
     parse_time_range,
 )
@@ -268,7 +268,7 @@ async def get_performance_metrics(
         else:
             # Default to today
             is_range = False
-            query_date = datetime.now().strftime("%Y-%m-%d")
+            query_date = get_today_date_string()
 
         metrics_data: dict[str, Any] = {}
 
@@ -293,7 +293,7 @@ async def get_performance_metrics(
             # Fitness age
             if include_fitness_age:
                 try:
-                    fitness_age = client.safe_call("get_fitness_age", query_date)
+                    fitness_age = client.safe_call("get_fitnessage_data", query_date)
                     metrics_data["fitness_age"] = fitness_age
                 except Exception:
                     metrics_data["fitness_age"] = None
@@ -365,11 +365,25 @@ async def get_training_effect(
 
         # Pattern 1: Training effect for activity
         if activity_id is not None:
-            effect = client.safe_call("get_training_effect", activity_id)
+            if activity_id <= 0:
+                return ResponseBuilder.build_error_response(
+                    "activity_id must be positive", "invalid_parameters"
+                )
+            activity = client.safe_call("get_activity", activity_id)
+            effect = {
+                key: value
+                for key, value in activity.items()
+                if "trainingeffect" in key.lower() or key == "activityTrainingLoad"
+            }
 
             return ResponseBuilder.build_response(
                 data={"training_effect": effect},
-                metadata={"activity_id": activity_id},
+                analysis={
+                    "insights": [
+                        "Training-effect fields are sourced from the supported activity summary"
+                    ]
+                },
+                metadata={"activity_id": activity_id, "source_method": "get_activity"},
             )
 
         # Pattern 2: Progress summary

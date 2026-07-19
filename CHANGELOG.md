@@ -51,9 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `auth doctor` to report legacy auth artifacts without exposing their contents
 - Add a fingerprinted `auth migrate` plan that quarantines the deprecated token before the
   separately confirmed `auth migrate --purge` deletion
+- Add an executable compatibility matrix and credential-free contract tests for every MCP tool
+  and resource against `garminconnect==0.3.6`
 
 ### Changed
 
+- Correct workout, challenge, gear, device, fitness-age, training-effect, weight, body-composition,
+  blood-pressure, and hydration calls to the pinned dependency API; encode FIT downloads as Base64
+  and return a stable capability error for unsupported activity social data
+- Resolve relative dates in the server's local timezone and pass concrete ISO dates to every
+  dependency method that requires them
 - Share one synchronized Garmin session across MCP tools and resources
 - Bind each in-memory wrapper to one canonical generation, revalidate it before and after remote
   calls, and permanently revoke stale wrappers after external authentication changes

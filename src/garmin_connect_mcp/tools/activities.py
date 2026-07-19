@@ -5,6 +5,7 @@ from typing import Annotated, Any
 from fastmcp import Context
 
 from ..client import GarminAPIError, GarminClientWrapper
+from ..compatibility import unavailable_message
 from ..pagination import build_pagination_info, decode_cursor
 from ..response_builder import ResponseBuilder
 from ..time_utils import parse_date_string
@@ -813,53 +814,9 @@ async def get_activity_social(
     Returns:
         Structured JSON with social data, analysis, and metadata
     """
-    assert ctx is not None
-    try:
-        client = await ctx.get_state("client")
-
-        # Get activity social details
-        social = client.safe_call("get_activity_social", activity_id)
-
-        # Generate insights
-        insights = []
-        if social:
-            # Count likes/kudos
-            likes_count = 0
-            if isinstance(social, dict):
-                if "likes" in social and isinstance(social["likes"], list):
-                    likes_count = len(social["likes"])
-                elif "kudos" in social and isinstance(social["kudos"], list):
-                    likes_count = len(social["kudos"])
-
-            if likes_count > 0:
-                insights.append(f"Received {likes_count} like(s)/kudo(s)")
-
-            # Count comments
-            comments_count = 0
-            if (
-                isinstance(social, dict)
-                and "comments" in social
-                and isinstance(social["comments"], list)
-            ):
-                comments_count = len(social["comments"])
-
-            if comments_count > 0:
-                insights.append(f"Has {comments_count} comment(s)")
-
-            if likes_count == 0 and comments_count == 0:
-                insights.append("No social interactions yet")
-
-        return ResponseBuilder.build_response(
-            data={"activity_id": activity_id, "social": social},
-            analysis={"insights": insights} if insights else None,
-            metadata={"query_type": "activity_social", "activity_id": activity_id},
-        )
-
-    except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify the activity ID is correct"],
-        )
-    except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+    del activity_id, ctx
+    return ResponseBuilder.build_error_response(
+        unavailable_message("get_activity_social"),
+        "capability_unavailable",
+        ["Use get_activity_details for the supported activity data available in this version"],
+    )

@@ -7,6 +7,8 @@ from fastmcp import Context
 from ..client import GarminAPIError
 from ..response_builder import ResponseBuilder
 
+CHALLENGE_PAGE_SIZE = 100
+
 
 async def query_goals_and_records(
     include_goals: Annotated[bool, "Include activity goals"] = True,
@@ -87,6 +89,19 @@ async def query_challenges(
 
     Filters by status (active/available/earned) and type (badge/adhoc/virtual).
     """
+    if status not in {"active", "available", "earned", "all"}:
+        return ResponseBuilder.build_error_response(
+            f"Invalid challenge status: {status}",
+            "invalid_parameters",
+            ["Valid statuses: 'active', 'available', 'earned', 'all'"],
+        )
+    if challenge_type not in {"badge", "adhoc", "virtual", "all"}:
+        return ResponseBuilder.build_error_response(
+            f"Invalid challenge type: {challenge_type}",
+            "invalid_parameters",
+            ["Valid types: 'badge', 'adhoc', 'virtual', 'all'"],
+        )
+
     assert ctx is not None
     try:
         client = await ctx.get_state("client")
@@ -98,14 +113,18 @@ async def query_challenges(
             # Badge challenges
             if status in ["available", "all"]:
                 try:
-                    available_badges = client.safe_call("get_available_badge_challenges")
+                    available_badges = client.safe_call(
+                        "get_available_badge_challenges", 0, CHALLENGE_PAGE_SIZE
+                    )
                     data["available_badges"] = available_badges
                 except Exception:
                     data["available_badges"] = None
 
             if status in ["active", "all"]:
                 try:
-                    non_completed = client.safe_call("get_non_completed_badge_challenges")
+                    non_completed = client.safe_call(
+                        "get_non_completed_badge_challenges", 0, CHALLENGE_PAGE_SIZE
+                    )
                     data["active_badges"] = non_completed
                 except Exception:
                     data["active_badges"] = None
@@ -119,14 +138,14 @@ async def query_challenges(
 
             # All badge challenges
             try:
-                all_badges = client.safe_call("get_badge_challenges")
+                all_badges = client.safe_call("get_badge_challenges", 0, CHALLENGE_PAGE_SIZE)
                 data["all_badge_challenges"] = all_badges
             except Exception:
                 data["all_badge_challenges"] = None
 
         if challenge_type in ["adhoc", "all"]:
             try:
-                adhoc = client.safe_call("get_adhoc_challenges")
+                adhoc = client.safe_call("get_adhoc_challenges", 0, CHALLENGE_PAGE_SIZE)
                 data["adhoc_challenges"] = adhoc
             except Exception:
                 data["adhoc_challenges"] = None
@@ -134,7 +153,9 @@ async def query_challenges(
         if challenge_type in ["virtual", "all"]:
             if status in ["active", "all"]:
                 try:
-                    virtual = client.safe_call("get_inprogress_virtual_challenges")
+                    virtual = client.safe_call(
+                        "get_inprogress_virtual_challenges", 1, CHALLENGE_PAGE_SIZE
+                    )
                     data["active_virtual_challenges"] = virtual
                 except Exception:
                     data["active_virtual_challenges"] = None

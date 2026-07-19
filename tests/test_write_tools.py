@@ -78,19 +78,26 @@ async def test_weight_execution_uses_mutation_facade_and_idempotency_key():
     )
 
     assert payload["metadata"]["dry_run"] is False
-    assert client.calls == [("add_weigh_in", (75, "2026-07-19"), {}, "request-0001")]
+    assert client.calls == [
+        (
+            "add_weigh_in",
+            (75, "kg", "2026-07-19T12:00:00"),
+            {},
+            "request-0001",
+        )
+    ]
 
 
 @pytest.mark.asyncio
 async def test_delete_requires_confirmation_from_preview():
-    preview = json.loads(await delete_weight_entries("123,456"))
+    preview = json.loads(await delete_weight_entries("2026-07-19"))
     required = preview["data"]["preview"]["required_confirmation"]
     client = FakeMutationClient()
     context = FakeContext(client)
 
     denied = json.loads(
         await delete_weight_entries(
-            "123,456",
+            "2026-07-19",
             confirmation="yes",
             idempotency_key="request-0002",
             dry_run=False,
@@ -99,7 +106,7 @@ async def test_delete_requires_confirmation_from_preview():
     )
     accepted = json.loads(
         await delete_weight_entries(
-            "123,456",
+            "2026-07-19",
             confirmation=required,
             idempotency_key="request-0002",
             dry_run=False,
@@ -109,18 +116,18 @@ async def test_delete_requires_confirmation_from_preview():
 
     assert denied["error"]["type"] == "invalid_parameters"
     assert accepted["metadata"]["capability"] == "weight.delete"
-    assert client.calls == [("delete_weigh_ins", ([123, 456],), {}, "request-0002")]
+    assert client.calls == [("delete_weigh_ins", ("2026-07-19", True), {}, "request-0002")]
 
 
 @pytest.mark.asyncio
-async def test_delete_rejects_id_above_signed_64_bit_bound_before_client_lookup():
+async def test_delete_rejects_invalid_date_before_client_lookup():
     client = FakeMutationClient()
     context = FakeContext(client)
 
     payload = json.loads(
         await delete_weight_entries(
-            str(2**63),
-            confirmation=f"DELETE WEIGH-INS {2**63}",
+            "not-a-date",
+            confirmation="DELETE WEIGH-INS ON not-a-date",
             idempotency_key="request-0002",
             dry_run=False,
             ctx=context,  # type: ignore[arg-type]
@@ -128,7 +135,7 @@ async def test_delete_rejects_id_above_signed_64_bit_bound_before_client_lookup(
     )
 
     assert payload["error"]["type"] == "invalid_parameters"
-    assert "9223372036854775807" in payload["error"]["message"]
+    assert "Invalid date format" in payload["error"]["message"]
     assert context.calls == 0
     assert client.calls == []
 
@@ -148,7 +155,7 @@ async def test_workout_preview_validates_size_and_structure_locally():
     ("tool", "data"),
     [
         (log_body_composition, '{"weight":501}'),
-        (log_blood_pressure, '{"systolic":120,"diastolic":120}'),
+        (log_blood_pressure, '{"systolic":120,"diastolic":120,"pulse":60}'),
         (log_hydration, '{"volume_ml":5001}'),
     ],
 )
@@ -174,7 +181,7 @@ async def test_each_health_tool_uses_its_own_capability_method():
     )
     blood = json.loads(
         await log_blood_pressure(
-            '{"systolic":120,"diastolic":80}',
+            '{"systolic":120,"diastolic":80,"pulse":60}',
             "2026-07-19",
             idempotency_key="request-blood",
             dry_run=False,
@@ -199,3 +206,17 @@ async def test_each_health_tool_uses_its_own_capability_method():
         "set_blood_pressure",
         "add_hydration_data",
     ]
+    assert client.calls[0][1] == ()
+    assert client.calls[0][2] == {
+        "timestamp": "2026-07-19T12:00:00",
+        "weight": 75.0,
+        "percent_fat": 15.0,
+        "percent_hydration": None,
+    }
+    assert client.calls[1][1] == (120, 80, 60, "2026-07-19T12:00:00")
+    assert client.calls[1][2] == {}
+    assert client.calls[2][1] == (500.0,)
+    assert client.calls[2][2] == {
+        "timestamp": "2026-07-19T12:00:00",
+        "cdate": "2026-07-19",
+    }

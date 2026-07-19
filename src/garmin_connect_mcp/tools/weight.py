@@ -7,9 +7,7 @@ from fastmcp import Context
 
 from ..client import GarminAPIError
 from ..response_builder import ResponseBuilder
-from ..time_utils import parse_date_string
-
-MAX_WEIGH_IN_ID = 2**63 - 1
+from ..time_utils import local_noon_timestamp, parse_date_string
 
 
 async def query_weight_data(
@@ -77,6 +75,7 @@ async def add_weight_entry(
         if not math.isfinite(weight) or not 20 <= weight <= 500:
             raise ValueError("weight must be a finite value from 20 through 500 kg")
         date_str = _entry_date(date)
+        timestamp = local_noon_timestamp(date_str)
         preview = {"weight": weight, "date": date_str}
         if dry_run:
             return ResponseBuilder.build_response(
@@ -90,7 +89,8 @@ async def add_weight_entry(
         result = client.mutate(
             "add_weigh_in",
             weight,
-            date_str,
+            "kg",
+            timestamp,
             idempotency_key=idempotency_key,
         )
         return ResponseBuilder.build_response(
@@ -111,10 +111,10 @@ async def add_weight_entry(
 
 
 async def delete_weight_entries(
-    weigh_in_ids: Annotated[
-        str,
-        "Comma-separated positive 64-bit weigh-in IDs; maximum 25",
-    ],
+    date: Annotated[
+        str | None,
+        "Calendar date whose weigh-ins will all be deleted (defaults to today)",
+    ] = None,
     confirmation: Annotated[
         str | None,
         "Exact confirmation returned by the dry-run preview",
@@ -129,13 +129,13 @@ async def delete_weight_entries(
     ] = True,
     ctx: Context | None = None,
 ) -> str:
-    """Preview or explicitly confirm deletion of bounded weigh-in IDs."""
+    """Preview or explicitly confirm deletion of all weigh-ins on one date."""
     try:
-        ids = _parse_weigh_in_ids(weigh_in_ids)
-        required_confirmation = f"DELETE WEIGH-INS {','.join(str(value) for value in ids)}"
+        date_str = _entry_date(date)
+        required_confirmation = f"DELETE WEIGH-INS ON {date_str}"
         preview = {
-            "weigh_in_ids": ids,
-            "count": len(ids),
+            "date": date_str,
+            "delete_all": True,
             "required_confirmation": required_confirmation,
         }
         if dry_run:
@@ -153,13 +153,14 @@ async def delete_weight_entries(
         client = await ctx.get_state("client")
         result = client.mutate(
             "delete_weigh_ins",
-            ids,
+            date_str,
+            True,
             idempotency_key=idempotency_key,
         )
 
         return ResponseBuilder.build_response(
-            data={"result": result, "deleted_ids": ids},
-            analysis={"insights": [f"Deleted {len(ids)} weight entries"]},
+            data={"result": result, "date": date_str},
+            analysis={"insights": [f"Deleted all weigh-ins on {date_str}"]},
             metadata={
                 "dry_run": False,
                 "capability": "weight.delete",
@@ -181,19 +182,3 @@ def _entry_date(value: str | None) -> str:
 def _require_idempotency_key(value: str | None) -> None:
     if value is None:
         raise ValueError("idempotency_key is required when dry_run is false")
-
-
-def _parse_weigh_in_ids(value: str) -> list[int]:
-    if not value or len(value) > 512:
-        raise ValueError("weigh_in_ids must be a non-empty comma-separated value")
-    try:
-        parsed = [int(part.strip()) for part in value.split(",")]
-    except ValueError as exc:
-        raise ValueError("weigh_in_ids must contain only integers") from exc
-    if not 1 <= len(parsed) <= 25:
-        raise ValueError("weigh_in_ids must contain from 1 through 25 IDs")
-    if any(value <= 0 or value > MAX_WEIGH_IN_ID for value in parsed):
-        raise ValueError(f"weigh_in_ids must be from 1 through {MAX_WEIGH_IN_ID}")
-    if len(set(parsed)) != len(parsed):
-        raise ValueError("weigh_in_ids must not contain duplicates")
-    return parsed

@@ -165,17 +165,18 @@ def get_week_ranges(start_date: datetime, end_date: datetime) -> list[tuple[date
     return weeks
 
 
-def get_today_date_string() -> str:
+def get_today_date_string(*, now: datetime | None = None) -> str:
     """
     Get today's date as a string in YYYY-MM-DD format.
 
     Returns:
         Today's date string
     """
-    return datetime.now().strftime("%Y-%m-%d")
+    reference = now if now is not None else datetime.now().astimezone()
+    return reference.strftime("%Y-%m-%d")
 
 
-def parse_date_string(date_str: str) -> datetime:
+def parse_date_string(date_str: str, *, now: datetime | None = None) -> datetime:
     """
     Parse a date string in various formats to a datetime object.
 
@@ -196,12 +197,15 @@ def parse_date_string(date_str: str) -> datetime:
     """
     date_str = date_str.strip().lower()
 
+    reference = now if now is not None else datetime.now().astimezone()
+
     if date_str == "today":
-        return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        return datetime.combine(reference.date(), datetime.min.time())
 
     if date_str == "yesterday":
-        return (datetime.now() - timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
+        return datetime.combine(
+            reference.date() - timedelta(days=1),
+            datetime.min.time(),
         )
 
     try:
@@ -217,3 +221,15 @@ def parse_date_string(date_str: str) -> datetime:
         raise ValueError(
             f"Invalid date format: {date_str}. Use 'today', 'yesterday', or 'YYYY-MM-DD'"
         ) from e
+
+
+def local_noon_timestamp(date_str: str) -> str:
+    """Return local noon for a validated calendar date.
+
+    Garmin's write methods accept a local timestamp and derive UTC using the process
+    timezone. Noon avoids midnight/DST boundary ambiguity while preserving the requested
+    local calendar date.
+    """
+
+    parsed = parse_date_string(date_str)
+    return parsed.replace(hour=12).isoformat(timespec="seconds")

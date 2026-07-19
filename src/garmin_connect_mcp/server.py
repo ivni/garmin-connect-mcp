@@ -4,6 +4,8 @@ from textwrap import dedent
 
 from fastmcp import FastMCP
 
+from .time_utils import get_today_date_string
+
 # Initialize FastMCP server
 mcp = FastMCP("Garmin Connect")
 
@@ -267,9 +269,10 @@ async def athlete_profile_resource() -> str:
     full_name = wrapper.safe_call("get_full_name")
     unit_system = wrapper.safe_call("get_unit_system")
 
-    # Get stats
-    user_summary = wrapper.safe_call("get_user_summary")
-    daily_stats = wrapper.safe_call("get_stats", "today")
+    # Garmin 0.3.6 requires an explicit ISO calendar date for both calls.
+    today = get_today_date_string()
+    user_summary = wrapper.safe_call("get_user_summary", today)
+    daily_stats = wrapper.safe_call("get_stats", today)
 
     return ResponseBuilder.build_response(
         data={
@@ -277,7 +280,7 @@ async def athlete_profile_resource() -> str:
             "summary": user_summary,
             "stats": daily_stats,
         },
-        metadata={"resource": "athlete_profile"},
+        metadata={"resource": "athlete_profile", "date": today},
     )
 
 
@@ -298,12 +301,13 @@ async def training_readiness_resource() -> str:
     except GarminAPIError as exc:
         return ResponseBuilder.build_error_response(exc.message)
 
-    # Get today's health data
-    daily_stats = wrapper.safe_call("get_stats", "today")
+    # Garmin 0.3.6 requires an explicit ISO calendar date.
+    today = get_today_date_string()
+    daily_stats = wrapper.safe_call("get_stats", today)
 
     return ResponseBuilder.build_response(
         data={"readiness": daily_stats},
-        metadata={"resource": "training_readiness", "date": "today"},
+        metadata={"resource": "training_readiness", "date": today},
     )
 
 
@@ -324,12 +328,13 @@ async def health_today_resource() -> str:
     except GarminAPIError as exc:
         return ResponseBuilder.build_error_response(exc.message)
 
-    # Get today's health data
-    daily_stats = wrapper.safe_call("get_stats", "today")
+    # Garmin 0.3.6 requires an explicit ISO calendar date.
+    today = get_today_date_string()
+    daily_stats = wrapper.safe_call("get_stats", today)
 
     return ResponseBuilder.build_response(
         data={"health": daily_stats},
-        metadata={"resource": "health_today", "date": "today"},
+        metadata={"resource": "health_today", "date": today},
     )
 
 

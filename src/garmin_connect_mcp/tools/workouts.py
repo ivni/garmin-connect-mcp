@@ -1,5 +1,6 @@
 """Workout management tools for Garmin Connect MCP server."""
 
+import base64
 import hashlib
 import json
 from typing import Annotated
@@ -45,7 +46,7 @@ async def query_workouts(
                     ["Provide workout_id parameter"],
                 )
 
-            workout = client.safe_call("get_workout", workout_id)
+            workout = client.safe_call("get_workout_by_id", workout_id)
             return ResponseBuilder.build_response(
                 data={"workout": workout},
                 metadata={"action": "get", "workout_id": workout_id},
@@ -60,8 +61,21 @@ async def query_workouts(
                 )
 
             download_info = client.safe_call("download_workout", workout_id)
+            if not isinstance(download_info, bytes | bytearray):
+                raise GarminAPIError(
+                    "garminconnect returned an incompatible workout download response"
+                )
+            workout_file = bytes(download_info)
             return ResponseBuilder.build_response(
-                data={"download_info": download_info},
+                data={
+                    "workout_file": {
+                        "content_base64": base64.b64encode(workout_file).decode("ascii"),
+                        "content_type": "application/vnd.garmin.fit",
+                        "encoding": "base64",
+                        "sha256": hashlib.sha256(workout_file).hexdigest(),
+                        "size_bytes": len(workout_file),
+                    }
+                },
                 metadata={"action": "download", "workout_id": workout_id},
             )
 

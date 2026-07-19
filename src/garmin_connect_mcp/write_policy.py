@@ -19,7 +19,6 @@ READ_METHODS = frozenset(
         "get_activity_exercise_sets",
         "get_activity_gear",
         "get_activity_hr_in_timezones",
-        "get_activity_social",
         "get_activity_splits",
         "get_activity_weather",
         "get_adhoc_challenges",
@@ -37,7 +36,7 @@ READ_METHODS = frozenset(
         "get_devices",
         "get_earned_badges",
         "get_endurance_score",
-        "get_fitness_age",
+        "get_fitnessage_data",
         "get_floors",
         "get_full_name",
         "get_gear",
@@ -66,13 +65,13 @@ READ_METHODS = frozenset(
         "get_stats",
         "get_steps_data",
         "get_stress_data",
-        "get_training_effect",
         "get_training_readiness",
         "get_training_status",
         "get_unit_system",
+        "get_user_profile",
         "get_user_summary",
         "get_weigh_ins",
-        "get_workout",
+        "get_workout_by_id",
         "get_workouts",
     }
 )
@@ -90,8 +89,8 @@ MUTATION_TOOLS = {
         capability="weight.delete",
         method_name="delete_weigh_ins",
         reconciliation=(
-            "query weight data covering the target IDs and verify whether each entry remains "
-            "before attempting another deletion"
+            "query all weight data for the target date and verify whether any weigh-ins remain "
+            "before attempting another date-wide deletion"
         ),
     ),
     "upload_workout": MutationOperation(

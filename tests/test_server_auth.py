@@ -38,12 +38,13 @@ async def test_resource_uses_shared_session_manager(monkeypatch):
     wrapper = FakeWrapper()
     manager = FakeManager(client=wrapper)
     monkeypatch.setattr(session_module, "get_session_manager", lambda: manager)
+    monkeypatch.setattr(server, "get_today_date_string", lambda: "2026-07-19")
 
     result = await server.health_today_resource()
     payload = json.loads(result)
 
     assert manager.calls == 1
-    assert wrapper.calls == [("get_stats", ("today",))]
+    assert wrapper.calls == [("get_stats", ("2026-07-19",))]
     assert payload["data"]["health"] == {"method": "get_stats"}
 
 

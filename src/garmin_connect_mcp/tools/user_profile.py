@@ -1,11 +1,10 @@
 """User profile tools for Garmin Connect MCP server."""
 
-from datetime import datetime
-
 from fastmcp import Context
 
 from ..client import GarminAPIError
 from ..response_builder import ResponseBuilder
+from ..time_utils import get_today_date_string
 
 
 async def get_user_profile(
@@ -31,16 +30,18 @@ async def get_user_profile(
 
         # Get basic profile info
         full_name = client.safe_call("get_full_name")
+        profile = client.safe_call("get_user_profile")
 
         data = {
             "profile": {
                 "full_name": full_name,
+                "settings": profile,
             }
         }
 
         # Add stats and user summary
         if include_stats:
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = get_today_date_string()
             try:
                 stats = client.safe_call("get_stats", today)
                 data["stats"] = stats

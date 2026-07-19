@@ -376,13 +376,24 @@ _Note: List-returning tools use cursor-based pagination with default limits (10 
 
 ## Available Tools
 
+### Garmin API compatibility policy
+
+The MCP surface is verified against exactly `garminconnect==0.3.6`. The runtime dependency and
+the executable contract must be upgraded together: a version change is accepted only after every
+registered tool and resource has a binding-compatible method signature and declared return shape,
+all offline contract tests pass, and the matrix is updated. Relative dates (`today` and `yesterday`)
+use the server process's local timezone and are converted to `YYYY-MM-DD` before calling Garmin.
+
+See [the complete compatibility matrix](docs/garminconnect-compatibility.md) for every registered
+surface, dependency method, unsupported capability, date rule, and binary response rule.
+
 ### Activities (3 tools)
 
 | Tool                   | Description                                                            |
 | ---------------------- | ---------------------------------------------------------------------- |
 | `query_activities`     | Query activities with pagination (by ID, date range, or specific date) |
 | `get_activity_details` | Get comprehensive activity details (splits, weather, HR zones, gear)   |
-| `get_activity_social`  | Get social details for an activity (likes, comments, kudos)            |
+| `get_activity_social`  | Stable capability error: social calls are unavailable in 0.3.6         |
 
 ### Analysis (2 tools)
 
@@ -426,7 +437,7 @@ _Note: List-returning tools use cursor-based pagination with default limits (10 
 | Tool            | Description                                                  |
 | --------------- | ------------------------------------------------------------ |
 | `query_devices` | Query device information (with settings, solar data, alarms) |
-| `query_gear`    | Query gear and equipment (with defaults and usage stats)     |
+| `query_gear`    | Query gear by profile number; stats additionally require a gear UUID |
 
 ### Weight Management (3 tools)
 
@@ -434,7 +445,7 @@ _Note: List-returning tools use cursor-based pagination with default limits (10 
 | ----------------------- | ---------------------------------------------------------- |
 | `query_weight_data`     | Query weight data for date or range                        |
 | `add_weight_entry`      | Preview or add one bounded entry with `weight.write`       |
-| `delete_weight_entries` | Preview or confirm destructive deletion with `weight.delete` |
+| `delete_weight_entries` | Preview or confirm deletion of all weigh-ins on one date    |
 
 ### Other (6 tools)
 
@@ -443,7 +454,7 @@ _Note: List-returning tools use cursor-based pagination with default limits (10 
 | `query_workouts`       | List, get, or download workouts without mutation                   |
 | `upload_workout`       | Validate, preview, or upload with `workouts.upload`                |
 | `log_body_composition` | Validate, preview, or log with `health.body_composition`           |
-| `log_blood_pressure`   | Validate, preview, or log with `health.blood_pressure`             |
+| `log_blood_pressure`   | Validate systolic, diastolic, and pulse, then preview or log       |
 | `log_hydration`        | Validate, preview, or log with `health.hydration`                  |
 | `query_womens_health`  | Query pregnancy and menstrual cycle data                           |
 

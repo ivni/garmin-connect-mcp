@@ -11,7 +11,7 @@ from fastmcp import Context
 
 from ..client import GarminAPIError
 from ..response_builder import ResponseBuilder
-from ..time_utils import parse_date_string
+from ..time_utils import local_noon_timestamp, parse_date_string
 
 
 async def log_body_composition(
@@ -33,15 +33,22 @@ async def log_body_composition(
     """Preview or log one bounded body-composition entry."""
     try:
         params = _parse_json_object(data, {"weight", "body_fat", "body_water"})
-        _bounded_number(params, "weight", 20, 500, required=True)
-        _bounded_number(params, "body_fat", 0, 75)
-        _bounded_number(params, "body_water", 0, 100)
+        weight = _bounded_number(params, "weight", 20, 500, required=True)
+        body_fat = _bounded_number(params, "body_fat", 0, 75)
+        body_water = _bounded_number(params, "body_water", 0, 100)
+        date_str = _entry_date(date)
         return await _execute_health_write(
             method_name="add_body_composition",
             capability="health.body_composition",
-            date=_entry_date(date),
+            date=date_str,
             params=params,
-            positional=(),
+            method_args=(),
+            method_kwargs={
+                "timestamp": local_noon_timestamp(date_str),
+                "weight": weight,
+                "percent_fat": body_fat,
+                "percent_hydration": body_water,
+            },
             idempotency_key=idempotency_key,
             dry_run=dry_run,
             ctx=ctx,
@@ -57,7 +64,7 @@ async def log_body_composition(
 async def log_blood_pressure(
     data: Annotated[
         str,
-        "JSON object with systolic (70-260) and diastolic (40-150)",
+        "JSON object with systolic (70-260), diastolic (40-150), and pulse (20-250)",
     ],
     date: Annotated[str | None, "Date (YYYY-MM-DD, defaults to today)"] = None,
     idempotency_key: Annotated[
@@ -72,17 +79,20 @@ async def log_blood_pressure(
 ) -> str:
     """Preview or log one bounded blood-pressure entry."""
     try:
-        params = _parse_json_object(data, {"systolic", "diastolic"})
+        params = _parse_json_object(data, {"systolic", "diastolic", "pulse"})
         systolic = _bounded_integer(params, "systolic", 70, 260)
         diastolic = _bounded_integer(params, "diastolic", 40, 150)
+        pulse = _bounded_integer(params, "pulse", 20, 250)
         if diastolic >= systolic:
             raise ValueError("diastolic must be lower than systolic")
+        date_str = _entry_date(date)
         return await _execute_health_write(
             method_name="set_blood_pressure",
             capability="health.blood_pressure",
-            date=_entry_date(date),
+            date=date_str,
             params=params,
-            positional=(systolic, diastolic),
+            method_args=(systolic, diastolic, pulse, local_noon_timestamp(date_str)),
+            method_kwargs={},
             idempotency_key=idempotency_key,
             dry_run=dry_run,
             ctx=ctx,
@@ -112,12 +122,17 @@ async def log_hydration(
     try:
         params = _parse_json_object(data, {"volume_ml"})
         volume_ml = _bounded_number(params, "volume_ml", 1, 5000, required=True)
+        date_str = _entry_date(date)
         return await _execute_health_write(
             method_name="add_hydration_data",
             capability="health.hydration",
-            date=_entry_date(date),
+            date=date_str,
             params=params,
-            positional=(volume_ml,),
+            method_args=(volume_ml,),
+            method_kwargs={
+                "timestamp": local_noon_timestamp(date_str),
+                "cdate": date_str,
+            },
             idempotency_key=idempotency_key,
             dry_run=dry_run,
             ctx=ctx,
@@ -136,7 +151,8 @@ async def _execute_health_write(
     capability: str,
     date: str,
     params: dict[str, object],
-    positional: tuple[object, ...],
+    method_args: tuple[object, ...],
+    method_kwargs: dict[str, object],
     idempotency_key: str | None,
     dry_run: bool,
     ctx: Context | None,
@@ -152,20 +168,12 @@ async def _execute_health_write(
         raise ValueError("idempotency_key is required when dry_run is false")
     assert ctx is not None
     client = await ctx.get_state("client")
-    if method_name == "add_body_composition":
-        result = client.mutate(
-            method_name,
-            date,
-            **params,
-            idempotency_key=idempotency_key,
-        )
-    else:
-        result = client.mutate(
-            method_name,
-            date,
-            *positional,
-            idempotency_key=idempotency_key,
-        )
+    result = client.mutate(
+        method_name,
+        *method_args,
+        **method_kwargs,
+        idempotency_key=idempotency_key,
+    )
     return ResponseBuilder.build_response(
         data={"result": result, **preview},
         analysis={"insights": [f"Health data submitted for {date}"]},
