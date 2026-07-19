@@ -4,6 +4,8 @@
 SHELL := /bin/bash
 IMAGE_NAME := ghcr.io/eddmann/garmin-connect-mcp
 VERSION := $(shell grep '^version' pyproject.toml | cut -d '"' -f 2)
+SBOM_DIR := artifacts
+SBOM_FILE := $(SBOM_DIR)/garmin-connect-mcp-$(VERSION).cdx.json
 
 ##@ Setup
 
@@ -26,6 +28,7 @@ clean: ## Clean up cache files and build artifacts
 	@find . -type d -name __pycache__ -exec rm -rf {} +
 	@find . -type f -name "*.pyc" -delete
 	@rm -rf dist/ build/ *.egg-info/
+	@rm -rf $(SBOM_DIR)/
 
 ##@ Packaging
 
@@ -35,7 +38,17 @@ build: clean ## Build source and wheel distributions
 package/check: build ## Validate built distributions
 	@uvx twine check dist/*
 
+sbom: ## Generate a locked production CycloneDX SBOM
+	@mkdir -p $(SBOM_DIR)
+	@uv export --locked --no-dev --format cyclonedx1.5 --output-file $(SBOM_FILE)
+
 ##@ Development
+
+audit: ## Audit locked dependencies using reviewed exceptions
+	@uv run --locked scripts/dependency_audit.py
+
+qa: ## Run the complete local quality gate, including dependency audit
+	@uv run --locked scripts/qa.py
 
 auth: ## Run the Garmin authentication setup
 	@uv run garmin-connect-mcp auth

@@ -63,11 +63,14 @@ jobs:
           uv version "$VERSION"
           uv version
 
-      - name: Run release checks
+      - name: Run release QA, including dependency audit
         run: uv run --locked scripts/qa.py
 
       - name: Build package
         run: make package/check
+
+      - name: Generate release SBOM
+        run: make sbom
 
       - name: Publish package to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -108,5 +111,6 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
+            artifacts/*.cdx.json
           draft: false
           prerelease: false

@@ -1,0 +1,11 @@
+# Dependency-audit exceptions are intentionally empty.
+#
+# A temporary exception must be added as a complete, reviewable record:
+#
+# [[exceptions]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# package = "example-package"
+# reachability = "Explain whether and how the vulnerable path is reachable."
+# owner = "@github-handle"
+# expires = 2026-08-19
+# removal_condition = "Remove when example-package 1.2.3 is compatible."

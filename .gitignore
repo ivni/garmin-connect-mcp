@@ -55,3 +55,6 @@ REPORT.md
 htmlcov/
 
 # UV
+
+# Generated security artifacts
+artifacts/

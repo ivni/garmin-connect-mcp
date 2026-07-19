@@ -398,6 +398,19 @@ Prompt templates for common queries (accessible via prompt suggestion in Claude)
 | `compare_recent_runs`      | Compare recent runs to identify trends              |
 | `health_summary`           | Comprehensive health overview                       |
 
+## Development Quality Gate
+
+Run the complete locked quality gate locally with:
+
+```bash
+make qa
+```
+
+The gate includes linting, formatting, type checking, tests, and dependency auditing. Run only
+the dependency audit with `make audit`. Temporary advisory exceptions belong in
+`audit-exceptions.toml`; each entry must document reachability, an owner, a future expiry date,
+and its removal condition. Release SBOMs can be generated with `make sbom`.
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details

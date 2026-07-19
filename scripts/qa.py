@@ -10,6 +10,10 @@ CHECKS = (
     ("Ruff format", (sys.executable, "-m", "ruff", "format", "--check")),
     ("Pyright", (sys.executable, "-m", "pyright")),
     ("Pytest", (sys.executable, "-m", "pytest")),
+    (
+        "Dependency audit",
+        (sys.executable, "scripts/dependency_audit.py"),
+    ),
 )
 
 
