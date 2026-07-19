@@ -1,8 +1,11 @@
 """Garmin Connect API client wrapper with error handling."""
 
-import sys
+from __future__ import annotations
+
+import contextlib
+import logging
+import threading
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 from garminconnect import (
@@ -12,7 +15,7 @@ from garminconnect import (
     GarminConnectTooManyRequestsError,
 )
 
-from .auth import GarminConfig, get_token_base64_path, get_token_store
+logger = logging.getLogger(__name__)
 
 
 class GarminAPIError(Exception):
@@ -47,99 +50,38 @@ class GarminNotFoundError(GarminAPIError):
 class GarminAuthenticationError(GarminAPIError):
     """Exception raised when authentication fails (HTTP 401/403)."""
 
-    def __init__(self, original_error: Exception | None = None):
+    def __init__(
+        self,
+        message: str = "Authentication failed. Please run 'garmin-connect-mcp auth'.",
+        original_error: Exception | None = None,
+    ):
         super().__init__(
-            "Authentication failed. Please run 'garmin-connect-mcp auth' to re-authenticate.",
+            message,
             original_error=original_error,
         )
-
-
-def init_garmin_client(
-    config: GarminConfig, prompt_mfa: Callable[[], str] | None = None
-) -> Garmin | None:
-    """
-    Initialize and authenticate Garmin client.
-
-    Follows the authentication pattern from the original garmin_mcp project:
-    1. Try token-based login first
-    2. Fall back to credential-based login with MFA support
-    3. Persist tokens for future use
-
-    Args:
-        config: Garmin configuration with credentials
-        prompt_mfa: Optional callback for interactive MFA prompts. Only pass this from
-            interactive setup flows, not MCP runtime.
-
-    Returns:
-        Authenticated Garmin client or None on failure
-    """
-    try:
-        tokenstore = get_token_store()
-
-        # Try token-based login first
-        try:
-            # Check if tokens exist
-            token_path = Path(tokenstore)
-            if token_path.exists() and any(token_path.iterdir()):
-                # Try to login with existing tokens
-                garmin = Garmin()
-                garmin.login(tokenstore)
-                print("Logged in using token data from directory.", file=sys.stderr)
-                return garmin
-            else:
-                raise FileNotFoundError("No tokens found")
-
-        except (
-            FileNotFoundError,
-            GarminConnectAuthenticationError,
-            GarminConnectConnectionError,
-        ) as e:
-            # Token login failed, try credential login
-            print(f"Token login failed: {e}. Attempting credential-based login...", file=sys.stderr)
-
-            # Create Garmin client with credentials. MFA prompts are only enabled when
-            # an interactive caller explicitly supplies a callback.
-            garmin = Garmin(
-                email=config.garmin_email,
-                password=config.garmin_password,
-                prompt_mfa=prompt_mfa,
-            )
-
-            # Attempt credential-based login.
-            garmin.login()
-
-            # Save tokens for future use
-            garmin.client.dump(tokenstore)
-            print(f"OAuth tokens saved to directory: {tokenstore}", file=sys.stderr)
-
-            # Also save base64 encoded tokens
-            token_base64_path = get_token_base64_path()
-            Path(token_base64_path).write_text(garmin.client.dumps())
-            print(f"OAuth tokens encoded as base64: {token_base64_path}", file=sys.stderr)
-
-            return garmin
-
-    except GarminConnectAuthenticationError as err:
-        print(f"Authentication error: {err}", file=sys.stderr)
-        return None
-
-    except GarminConnectTooManyRequestsError as err:
-        print(f"Rate limit error: {err}", file=sys.stderr)
-        return None
-
-    except Exception as err:
-        print(f"Unexpected error during login: {err}", file=sys.stderr)
-        import traceback
-
-        traceback.print_exc(file=sys.stderr)
-        return None
 
 
 class GarminClientWrapper:
     """Wrapper around Garmin client for consistent error handling."""
 
-    def __init__(self, client: Garmin):
+    def __init__(
+        self,
+        client: Garmin,
+        lock: threading.RLock | None = None,
+        before_call: Callable[[], None] | None = None,
+        after_call: Callable[[], None] | None = None,
+        on_authentication_error: Callable[[], None] | None = None,
+    ):
         self.client = client
+        self._lock = lock
+        self._before_call = before_call
+        self._after_call = after_call
+        self._on_authentication_error = on_authentication_error
+        self._revoked = False
+
+    def revoke(self) -> None:
+        """Permanently prevent this generation wrapper from making another request."""
+        self._revoked = True
 
     def safe_call(self, method_name: str, *args, **kwargs) -> Any:
         """
@@ -163,14 +105,28 @@ class GarminClientWrapper:
             GarminRateLimitError: Rate limit exceeded (429)
             GarminAPIError: Other API errors
         """
+        lock_context = self._lock or contextlib.nullcontext()
         try:
-            method = getattr(self.client, method_name)
-            return method(*args, **kwargs)
+            with lock_context:
+                self._assert_active()
+                if self._before_call is not None:
+                    self._before_call()
+                self._assert_active()
+                try:
+                    method = getattr(self.client, method_name)
+                    result = method(*args, **kwargs)
+                except Exception:
+                    self._run_after_call()
+                    raise
+                self._run_after_call()
+                return result
         except AttributeError as e:
             raise GarminAPIError(
                 f"Method '{method_name}' not found on Garmin client", original_error=e
             ) from e
         except GarminConnectAuthenticationError as e:
+            if self._on_authentication_error is not None:
+                self._on_authentication_error()
             raise GarminAuthenticationError(original_error=e) from e
         except GarminConnectTooManyRequestsError as e:
             raise GarminRateLimitError(original_error=e) from e
@@ -182,8 +138,34 @@ class GarminClientWrapper:
             elif "404" in error_str or "Not Found" in error_str:
                 raise GarminNotFoundError(original_error=e) from e
             elif "401" in error_str or "403" in error_str or "Unauthorized" in error_str:
+                if self._on_authentication_error is not None:
+                    self._on_authentication_error()
                 raise GarminAuthenticationError(original_error=e) from e
             else:
                 raise GarminAPIError(f"Garmin API error: {str(e)}", original_error=e) from e
+        except GarminAPIError:
+            raise
         except Exception as e:
             raise GarminAPIError(f"Unexpected error: {str(e)}", original_error=e) from e
+
+    def _run_after_call(self) -> None:
+        """Persist refresh state without hiding an already completed API call."""
+        if self._after_call is None:
+            return
+        try:
+            self._after_call()
+        except Exception as exc:
+            self.revoke()
+            # A remote mutation may already be committed. Surfacing a later
+            # housekeeping error would invite an unsafe retry or duplicate.
+            logger.warning(
+                "Garmin API call completed, but refreshed-token persistence failed; "
+                "the cached session was invalidated: %s",
+                exc,
+            )
+
+    def _assert_active(self) -> None:
+        if self._revoked:
+            raise GarminAuthenticationError(
+                "This Garmin session generation was revoked. Retry the request."
+            )

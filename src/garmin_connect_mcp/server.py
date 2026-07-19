@@ -2,11 +2,7 @@
 
 from textwrap import dedent
 
-from dotenv import load_dotenv
 from fastmcp import FastMCP
-
-# Load environment variables
-load_dotenv()
 
 # Initialize FastMCP server
 mcp = FastMCP("Garmin Connect")
@@ -220,17 +216,15 @@ mcp.tool(
 )
 async def athlete_profile_resource() -> str:
     """Provide athlete profile with stats and zones for context-aware clients."""
-    # Resources don't go through middleware, so we initialize client directly
-    from .auth import load_config
-    from .client import GarminClientWrapper, init_garmin_client
+    # Resources don't go through middleware, so use the same shared manager directly.
+    from .client import GarminAPIError
     from .response_builder import ResponseBuilder
+    from .session import get_session_manager
 
-    config = load_config()
-    client = init_garmin_client(config)
-    if client is None:
-        return ResponseBuilder.build_error_response("Failed to initialize Garmin client")
-
-    wrapper = GarminClientWrapper(client)
+    try:
+        wrapper = get_session_manager().get_client()
+    except GarminAPIError as exc:
+        return ResponseBuilder.build_error_response(exc.message)
 
     # Get basic profile
     full_name = wrapper.safe_call("get_full_name")
@@ -258,16 +252,14 @@ async def athlete_profile_resource() -> str:
 )
 async def training_readiness_resource() -> str:
     """Provide current training readiness, Body Battery, and recovery status."""
-    from .auth import load_config
-    from .client import GarminClientWrapper, init_garmin_client
+    from .client import GarminAPIError
     from .response_builder import ResponseBuilder
+    from .session import get_session_manager
 
-    config = load_config()
-    client = init_garmin_client(config)
-    if client is None:
-        return ResponseBuilder.build_error_response("Failed to initialize Garmin client")
-
-    wrapper = GarminClientWrapper(client)
+    try:
+        wrapper = get_session_manager().get_client()
+    except GarminAPIError as exc:
+        return ResponseBuilder.build_error_response(exc.message)
 
     # Get today's health data
     daily_stats = wrapper.safe_call("get_stats", "today")
@@ -286,16 +278,14 @@ async def training_readiness_resource() -> str:
 )
 async def health_today_resource() -> str:
     """Provide today's health snapshot (steps, sleep, stress, HR)."""
-    from .auth import load_config
-    from .client import GarminClientWrapper, init_garmin_client
+    from .client import GarminAPIError
     from .response_builder import ResponseBuilder
+    from .session import get_session_manager
 
-    config = load_config()
-    client = init_garmin_client(config)
-    if client is None:
-        return ResponseBuilder.build_error_response("Failed to initialize Garmin client")
-
-    wrapper = GarminClientWrapper(client)
+    try:
+        wrapper = get_session_manager().get_client()
+    except GarminAPIError as exc:
+        return ResponseBuilder.build_error_response(exc.message)
 
     # Get today's health data
     daily_stats = wrapper.safe_call("get_stats", "today")

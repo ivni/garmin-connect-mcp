@@ -36,10 +36,13 @@ Additionally, the server provides:
 
 ### How Authentication Works
 
-1. Credential Authentication - Run the setup command to save credentials
-2. MFA Support - If MFA is enabled, the setup command prompts for your code
-3. Token Storage - OAuth tokens saved to `~/.garminconnect/` and automatically refreshed
-4. Persistence - Tokens persist across runs (UV on host, Docker requires volume mount)
+1. Bootstrap Login - The `auth` command uses your email, password, and optional MFA code once
+2. Ephemeral Credentials - Account credentials stay in process memory and are never saved
+3. Canonical Storage - One OAuth token store is saved under `~/.garminconnect/`
+4. In-memory Runtime - The dependency never receives the canonical path and cannot truncate it directly
+5. Atomic Refresh - Refreshed tokens use an inter-process lock, generation check, protected staging, and atomic replace
+6. Token-only Runtime - The MCP server never falls back to a saved password or interactive login
+7. Persistence - Host installs reuse the token store; Docker requires a read-write volume mount
 
 ### Option 1: Using uvx
 
@@ -48,15 +51,25 @@ uvx garmin-connect-mcp auth
 ```
 
 This will prompt for your credentials, complete Garmin authentication, and save OAuth tokens
-for the MCP server to reuse. It writes credentials to `~/.garminconnect.env` by default
-and saves OAuth tokens under `~/.garminconnect/`.
+for the MCP server to reuse under `~/.garminconnect/`. Password and MFA values are not saved.
 
-If you prefer manual configuration, create `~/.garminconnect.env` yourself:
+To use a custom token directory, set `GARMINTOKENS` in the process environment:
 
 ```bash
-GARMIN_EMAIL=your-email@example.com
-GARMIN_PASSWORD=your-password
+GARMINTOKENS=/secure/path/to/garmin-tokens
 ```
+
+`GARMINTOKENS` must name a dedicated directory, not a project, home, filesystem root, or current
+working directory. Its parent must already exist, and every entry in the parent chain must be
+protected against replacement by another principal; the application creates only the final
+dedicated child. An existing directory must already be owner-only and contain no unrelated
+entries. Ordinary login/token refresh never changes protection on a pre-existing directory.
+
+The server does not load dotenv files. Older `~/.garminconnect.env` or local `.env` files are
+inspected only by the explicit `auth doctor` and `auth migrate` commands. On POSIX the token
+directory/file must be owned by the current user with modes `0700`/`0600`; on Windows the
+application installs and verifies protected ACLs for the current user and SYSTEM. Redirected
+paths (symlinks, and Windows reparse points such as junctions) are rejected.
 
 ### Option 2: Using Docker
 
@@ -65,51 +78,108 @@ GARMIN_PASSWORD=your-password
 docker pull ghcr.io/eddmann/garmin-connect-mcp:latest
 ```
 
-Then configure credentials using one of these methods:
-
-#### Interactive Setup
+Create a Docker-managed parent volume, then run the interactive bootstrap login. The token store
+is an initially absent child so the application can create and own it safely:
 
 ```bash
-# Create the env file first (Docker will create it as a directory if it doesn't exist)
-touch garmin-connect-mcp.env
+docker volume create garmin-connect-mcp-tokens
 
-# Run the setup script and persist generated tokens
 docker run -it --rm \
-  -v "/ABSOLUTE/PATH/TO/garmin-connect-mcp.env:/app/.env" \
-  -v "/ABSOLUTE/PATH/TO/.garminconnect-docker:/root/.garminconnect" \
+  -v "garmin-connect-mcp-tokens:/root/.garmin-connect-mcp" \
+  -e "GARMINTOKENS=/root/.garmin-connect-mcp/tokens" \
   ghcr.io/eddmann/garmin-connect-mcp:latest \
   auth
 ```
 
-This will prompt for your credentials, complete Garmin authentication, and save credentials to
-`garmin-connect-mcp.env`. If you have MFA enabled, enter the code during this setup step.
+Use `-it` so password and MFA prompts work. The same volume must be mounted read-write
+when the server runs so refreshed tokens can be persisted. The process can start without a
+token, but every token-dependent tool or resource call then fails with an instruction to run
+`garmin-connect-mcp auth`; it never falls back to a password.
 
-#### Manual Setup
+The named volume is intentional: Docker creates its root for the container's root user, while the
+application creates the `tokens` child with owner-only protection. A host bind mount normally
+retains the host UID and is rejected when the container runs as root. Advanced Linux users who
+need a bind mount must run the container with the host UID/GID and set `GARMINTOKENS` to an
+appropriate dedicated child directory explicitly.
 
-Create a `garmin-connect-mcp.env` file manually in your current directory:
+### Auditing and Migrating Older Installs
 
-```bash
-GARMIN_EMAIL=your-email@example.com
-GARMIN_PASSWORD=your-password
-```
-
-#### MFA Support for Docker
-
-If you have MFA enabled on your Garmin account:
-
-- Run the interactive setup command with `-it` so you can enter your MFA code
-- The MCP server should then use saved tokens and should not prompt during runtime
-- **Important**: Without token persistence, you'll need to authenticate again on every container restart
-- **Recommended**: Mount the token directory as a volume during setup and server runs to persist tokens
-
-To persist tokens across Docker runs, create a directory for tokens and mount it:
+Older versions could leave a second token copy at `~/.garminconnect_base64` and save Garmin
+credentials in dotenv files. Inspect the installation without displaying secret values:
 
 ```bash
-# Create token directory on host
-mkdir -p ~/.garminconnect-docker
-
-# Then use this directory in your Docker configuration (see Claude Desktop Configuration below)
+uvx garmin-connect-mcp auth doctor
 ```
+
+If `doctor` reports an interrupted token write, the protected staging artifact is preserved:
+read-only startup, diagnostics, and migration planning never delete or promote an ambiguous token
+generation. A still-usable canonical token remains the runtime source. Complete a fresh `auth` login
+or a successful token refresh before migration; only a writer that has already fsynced another valid,
+protected candidate may remove the interrupted artifact. Do not copy, decode, or manually merge it.
+If the artifact itself is no longer owner-only, `doctor` treats that as possible disclosure rather
+than a recoverable protected state; re-authenticate and rotate the affected Garmin session.
+
+An interrupted dotenv migration is handled separately. Each known dotenv target has one
+deterministic transaction sidecar, which `doctor` reports without changing it. `auth migrate`
+removes that sidecar only after confirmation and only while holding the global migration lock,
+after revalidating that it is an owner-controlled, single-link file with exactly the target's
+protection and either empty or the recognized original/cleaned counterpart. Unknown or changed
+sidecar contents are refused and are never removed by a filename glob.
+
+After a valid canonical token exists, print the exact migration plan and apply it with an
+explicit confirmation:
+
+```bash
+uvx garmin-connect-mcp auth migrate
+```
+
+The plan names every target path and dotenv key without printing values. Stored credentials
+are removed only after the migration lock is held and the complete positive and negative dotenv,
+legacy-token, quarantine, and recovery inventory still matches the prepared plan. On POSIX, cleanup
+preserves the exact owning user, owning group, mode, and supported metadata; it refuses a parent
+path another user could rewrite, a group the process cannot reproduce, or a foreign-owned
+artifact instead of trying to repair it. A recognized legacy token is marked as a possible prior
+disclosure unless it is already owner-only, then hardened and atomically moved into an owner-only
+quarantine inside the canonical store so the operation remains recoverable. An existing
+current-owned quarantine with weaker protection is repaired only as an explicit item in the
+confirmed migration plan. A foreign-owned quarantine, any post-plan owner/protection change, or a
+quarantine that is not owner-only immediately before purge is refused. Verify normal
+authentication, then perform the separately planned deletion:
+
+```bash
+uvx garmin-connect-mcp auth migrate --purge
+```
+
+`--yes` skips the interactive confirmation but does not broaden scope. A local project `.env`
+requires `--include-local-env`; a non-default legacy-token path requires
+`--allow-custom-legacy`. Unknown files, changed plans, redirected paths, cross-filesystem moves,
+unreadable, oversized, or non-UTF-8 dotenv files, token-shaped files that the installed
+`garminconnect` cannot load, and POSIX dotenv files with extended ACLs or attributes that cannot
+be preserved are refused. Legacy setting names are matched case-insensitively, including their
+original spelling in the displayed cleanup plan.
+
+If an older dedicated token directory has unsafe permissions, `auth migrate` includes the repair
+in its displayed confirmation plan. Permission changes are durably synchronized on POSIX and the
+canonical generation is revalidated afterward. First creation durably synchronizes both the new
+directory inode and its parent entry on POSIX. Ordinary `auth` refuses to repair or claim the
+directory implicitly.
+
+If `doctor` reports legacy variables supplied by an MCP launcher or parent process, remove
+`GARMIN_EMAIL`, `GARMIN_PASSWORD`, and `GARMINTOKENS_BASE64` from that external configuration;
+the migration command cannot mutate its parent environment.
+
+If an older dotenv file contains a custom `GARMINTOKENS` path, `doctor/migrate` will use it to
+locate the canonical token, but the MCP runtime will not. Move that setting into the MCP
+launcher's process environment before restarting the server.
+
+If a token or password may have been readable by another user, treat it as compromised and
+re-authenticate before migration. Permission repair or deleting a local copy cannot undo
+earlier disclosure.
+
+Every in-memory Garmin wrapper is bound to one canonical token fingerprint. The runtime verifies
+that generation before each remote call and conditionally revalidates or persists it afterward.
+An external re-authentication permanently revokes older wrappers, so a multi-call operation cannot
+continue against a stale account generation.
 
 ## Claude Desktop Configuration
 
@@ -162,8 +232,6 @@ uv run garmin-connect-mcp auth
 
 ### Using Docker
 
-#### Without Token Persistence (MFA required on every restart)
-
 ```json
 {
   "mcpServers": {
@@ -174,7 +242,9 @@ uv run garmin-connect-mcp auth
         "-i",
         "--rm",
         "-v",
-        "/ABSOLUTE/PATH/TO/garmin-connect-mcp.env:/app/.env",
+        "garmin-connect-mcp-tokens:/root/.garmin-connect-mcp",
+        "-e",
+        "GARMINTOKENS=/root/.garmin-connect-mcp/tokens",
         "ghcr.io/eddmann/garmin-connect-mcp:latest"
       ]
     }
@@ -182,29 +252,8 @@ uv run garmin-connect-mcp auth
 }
 ```
 
-#### With Token Persistence (Recommended for MFA users)
-
-```json
-{
-  "mcpServers": {
-    "garmin": {
-      "command": "docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "-v",
-        "/ABSOLUTE/PATH/TO/garmin-connect-mcp.env:/app/.env",
-        "-v",
-        "/ABSOLUTE/PATH/TO/.garminconnect-docker:/root/.garminconnect",
-        "ghcr.io/eddmann/garmin-connect-mcp:latest"
-      ]
-    }
-  }
-}
-```
-
-Replace `/ABSOLUTE/PATH/TO/.garminconnect-docker` with the absolute path to your token directory. On Windows, use something like `C:\\Users\\YOUR_USERNAME\\.garminconnect-docker`.
+Create and authenticate the `garmin-connect-mcp-tokens` named volume with the Docker bootstrap
+command above before starting Claude Desktop. Reuse that exact volume name in both commands.
 
 ## Usage
 

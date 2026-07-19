@@ -1,7 +1,4 @@
-"""Middleware for Garmin Connect MCP server.
-
-This module provides middleware components that run before tool execution.
-"""
+"""Middleware that injects the shared token-authenticated Garmin client."""
 
 from collections.abc import Callable
 from typing import Any
@@ -9,50 +6,29 @@ from typing import Any
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
-from .auth import load_config, validate_credentials
-from .client import GarminClientWrapper, init_garmin_client
+from .client import GarminAPIError
+from .session import GarminSessionManager, get_session_manager
 
 
 class ConfigMiddleware(Middleware):
-    """Middleware that initializes Garmin client for all tool calls.
+    """Inject one process-wide Garmin session into tool context."""
 
-    This middleware:
-    1. Loads the Garmin config from environment variables
-    2. Validates that credentials are properly configured
-    3. Initializes the Garmin client
-    4. Injects the client into the context state for tools to access via ctx.get_state("client")
-    5. Raises ToolError if authentication fails
-    """
+    def __init__(self, session_manager: GarminSessionManager | None = None):
+        self._session_manager = session_manager
 
     async def on_call_tool(self, context: MiddlewareContext, call_next: Callable[..., Any]):
-        """Initialize Garmin client before every tool call."""
-        # Load and validate configuration
-        config = load_config()
+        """Resolve the token-only client before each tool call."""
+        manager = self._session_manager or get_session_manager()
+        try:
+            client = manager.get_client()
+        except GarminAPIError as exc:
+            raise ToolError(exc.message) from exc
 
-        if not validate_credentials(config):
-            raise ToolError(
-                "Garmin credentials not configured. "
-                "Please run 'garmin-connect-mcp auth' to set up authentication."
-            )
-
-        # Initialize Garmin client
-        client = init_garmin_client(config)
-        if client is None:
-            raise ToolError(
-                "Failed to initialize Garmin client. "
-                "Please run 'garmin-connect-mcp auth' to authenticate interactively. "
-                "If the problem persists, check your Garmin credentials."
-            )
-
-        client_wrapper = GarminClientWrapper(client)
-
-        # Inject client into context state for tools to access
         if context.fastmcp_context:
             await context.fastmcp_context.set_state(
                 "client",
-                client_wrapper,
+                client,
                 serializable=False,
             )
 
-        # Continue to the tool execution
         return await call_next(context)
