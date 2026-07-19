@@ -11,10 +11,15 @@ import pytest
 from garmin_connect_mcp import server, session
 from garmin_connect_mcp.time_utils import get_today_date_string, parse_date_string
 from garmin_connect_mcp.tools.activities import get_activity_social
+from garmin_connect_mcp.tools.analysis import find_similar_activities
 from garmin_connect_mcp.tools.challenges import query_challenges
 from garmin_connect_mcp.tools.devices import query_devices
 from garmin_connect_mcp.tools.gear import query_gear
-from garmin_connect_mcp.tools.training import get_performance_metrics, get_training_effect
+from garmin_connect_mcp.tools.training import (
+    analyze_training_period,
+    get_performance_metrics,
+    get_training_effect,
+)
 from garmin_connect_mcp.tools.workouts import query_workouts
 
 
@@ -119,7 +124,7 @@ async def test_device_solar_dates_and_alarm_signature_are_explicit():
 async def test_gear_identifiers_are_mapped_to_the_required_methods():
     client = RecordingClient()
 
-    await query_gear(
+    result = await query_gear(
         "123",
         gear_uuid="gear-uuid",
         include_defaults=True,
@@ -132,6 +137,7 @@ async def test_gear_identifiers_are_mapped_to_the_required_methods():
         ("get_gear_defaults", ("123",), {}),
         ("get_gear_stats", ("gear-uuid",), {}),
     ]
+    assert "user_profile_number" not in json.loads(result)["metadata"]
 
 
 @pytest.mark.asyncio
@@ -185,7 +191,69 @@ async def test_resources_pass_concrete_dates_to_required_dependency_arguments(mo
     await server.health_today_resource()
 
     assert ("get_user_summary", ("2026-07-19",), {}) in client.calls
-    assert client.calls.count(("get_stats", ("2026-07-19",), {})) == 3
+    assert client.calls.count(("get_stats", ("2026-07-19",), {})) == 2
+    assert ("get_training_readiness", ("2026-07-19",), {}) in client.calls
+
+
+@pytest.mark.asyncio
+async def test_training_period_projection_preserves_observable_breakdowns():
+    activities = [
+        {
+            "activityId": 1,
+            "activityType": {"typeKey": "running"},
+            "startTimeLocal": "2026-07-02T08:00:00",
+            "distance": 5000,
+            "duration": 1500,
+            "elevationGain": 25,
+        },
+        {
+            "activityId": 2,
+            "activityType": {"typeKey": "running"},
+            "startTimeLocal": "2026-07-09T08:00:00",
+            "distance": 10000,
+            "duration": 3300,
+            "elevationGain": 50,
+        },
+    ]
+    client = RecordingClient({"get_activities_by_date": activities})
+
+    result = await analyze_training_period(
+        "2026-07-01:2026-07-14",
+        ctx=FakeContext(client),  # type: ignore[arg-type]
+    )
+    data = json.loads(result)["data"]
+
+    assert data["summary"]["averages"]["distance_per_activity"]["meters"] == 7500
+    assert data["by_activity_type"][0]["type"] == "running"
+    assert len(data["trends"]["weekly"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_similar_activity_tool_preserves_all_documented_differences():
+    reference = {
+        "activityId": 1,
+        "activityType": {"typeKey": "running"},
+        "distance": 5000,
+        "duration": 1500,
+        "elevationGain": 100,
+    }
+    candidate = {
+        "activityId": 2,
+        "activityType": {"typeKey": "running"},
+        "distance": 5100,
+        "duration": 1530,
+        "elevationGain": 105,
+    }
+    client = RecordingClient({"get_activity": reference, "get_activities": [reference, candidate]})
+
+    result = await find_similar_activities(
+        1,
+        criteria="type,distance,elevation,duration",
+        ctx=FakeContext(client),  # type: ignore[arg-type]
+    )
+    differences = json.loads(result)["data"]["similar_activities"][0]["differences"]
+
+    assert set(differences) == {"type", "distance", "elevation", "duration"}
 
 
 def test_relative_dates_follow_the_server_local_timezone():

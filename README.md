@@ -374,6 +374,25 @@ _Note: The athlete profile resource (`garmin://athlete/profile`) and daily healt
 
 _Note: List-returning tools use cursor-based pagination with default limits (10 items for activities, 7 for health data)._
 
+### Response privacy
+
+All tool and resource responses use a fail-closed public projection. Data that
+was explicitly requested remains available, while unknown Garmin fields,
+unrelated identifiers, device serial numbers, owner/profile IDs, and raw
+internal exceptions are removed. Successful and error responses declare
+`metadata.response_schema` as `"2"`.
+
+Exact activity location is excluded by default. Pass `include_location=true`
+to `query_activities` or `get_activity_details` only when coordinates are
+needed. Pregnancy and menstrual data is returned only by an explicit
+`query_womens_health` call; that call itself is the opt-in for the selected
+category.
+
+The MCP host and model receive the projected data and may retain it according
+to the host's chat, logging, and cloud-storage policies. Read-only operation
+does not make health data non-sensitive. There is no generic raw-response mode.
+See the [complete response exposure and migration contract](docs/data-exposure.md).
+
 ## Available Tools
 
 ### Garmin API compatibility policy
@@ -391,8 +410,8 @@ surface, dependency method, unsupported capability, date rule, and binary respon
 
 | Tool                   | Description                                                            |
 | ---------------------- | ---------------------------------------------------------------------- |
-| `query_activities`     | Query activities with pagination (by ID, date range, or specific date) |
-| `get_activity_details` | Get comprehensive activity details (splits, weather, HR zones, gear)   |
+| `query_activities`     | Query projected activities; exact location requires `include_location=true` |
+| `get_activity_details` | Get projected splits, weather, HR zones, and gear; location is opt-in  |
 | `get_activity_social`  | Stable capability error: social calls are unavailable in 0.3.6         |
 
 ### Analysis (2 tools)
@@ -423,7 +442,7 @@ surface, dependency method, unsupported capability, date rule, and binary respon
 
 | Tool               | Description                                          |
 | ------------------ | ---------------------------------------------------- |
-| `get_user_profile` | Get comprehensive athlete profile with stats and PRs |
+| `get_user_profile` | Get a projected athlete profile with stats and PRs   |
 
 ### Challenges & Goals (2 tools)
 
@@ -436,7 +455,7 @@ surface, dependency method, unsupported capability, date rule, and binary respon
 
 | Tool            | Description                                                  |
 | --------------- | ------------------------------------------------------------ |
-| `query_devices` | Query device information (with settings, solar data, alarms) |
+| `query_devices` | Query projected device data without serial, unit, or owner IDs |
 | `query_gear`    | Query gear by profile number; stats additionally require a gear UUID |
 
 ### Weight Management (3 tools)
@@ -460,13 +479,14 @@ surface, dependency method, unsupported capability, date rule, and binary respon
 
 ## MCP Resources
 
-Resources provide ongoing context to the LLM without requiring explicit tool calls:
+Resources provide projected ongoing context to the LLM without requiring explicit tool calls.
+They follow the same field allowlists as tools and never include location or reproductive-health data:
 
 | Resource                      | Description                                        |
 | ----------------------------- | -------------------------------------------------- |
-| `garmin://athlete/profile`    | Athlete profile with stats, zones, and PRs         |
-| `garmin://training/readiness` | Current training readiness and Body Battery        |
-| `garmin://health/today`       | Today's health snapshot (steps, sleep, stress, HR) |
+| `garmin://athlete/profile`    | Compact athlete profile and projected daily health |
+| `garmin://training/readiness` | Projected readiness and recovery context            |
+| `garmin://health/today`       | Projected daily health snapshot                     |
 
 ## MCP Prompts
 

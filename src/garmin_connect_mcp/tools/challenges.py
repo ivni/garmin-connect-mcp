@@ -67,16 +67,13 @@ async def query_goals_and_records(
                     "race_predictions": include_race_predictions,
                 }
             },
+            surface="query_goals_and_records",
         )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 async def query_challenges(
@@ -178,13 +175,10 @@ async def query_challenges(
             data=data,
             analysis={"insights": insights} if insights else None,
             metadata={"status": status, "challenge_type": challenge_type},
+            surface="query_challenges",
         )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)

@@ -36,6 +36,7 @@ async def query_workouts(
                     "count": len(workouts) if isinstance(workouts, list) else 0,
                 },
                 metadata={"action": "list"},
+                surface="query_workouts",
             )
 
         elif action == "get":
@@ -50,6 +51,7 @@ async def query_workouts(
             return ResponseBuilder.build_response(
                 data={"workout": workout},
                 metadata={"action": "get", "workout_id": workout_id},
+                surface="query_workouts",
             )
 
         elif action == "download":
@@ -77,6 +79,7 @@ async def query_workouts(
                     }
                 },
                 metadata={"action": "download", "workout_id": workout_id},
+                surface="query_workouts",
             )
 
         else:
@@ -87,9 +90,9 @@ async def query_workouts(
             )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(e.message, "api_error")
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 async def upload_workout(
@@ -116,6 +119,7 @@ async def upload_workout(
                 data={"preview": preview},
                 analysis={"insights": ["Dry-run only; Garmin was not contacted"]},
                 metadata={"dry_run": True, "capability": "workouts.upload"},
+                surface="upload_workout",
             )
         if idempotency_key is None:
             raise ValueError("idempotency_key is required when dry_run is false")
@@ -134,13 +138,14 @@ async def upload_workout(
                 "capability": "workouts.upload",
                 "idempotency_key": idempotency_key,
             },
+            surface="upload_workout",
         )
     except ValueError as e:
         return ResponseBuilder.build_error_response(str(e), "invalid_parameters")
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(e.message, "api_error")
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 def _validate_workout_data(value: str) -> tuple[int, str]:

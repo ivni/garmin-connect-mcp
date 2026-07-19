@@ -20,6 +20,7 @@ async def _query_activities_paginated(
     cursor: str | None,
     limit: int,
     unit: UnitSystem,
+    include_location: bool,
 ) -> str:
     """Query activities by date range with cursor-based pagination."""
     # Parse cursor to get current page
@@ -88,6 +89,8 @@ async def _query_activities_paginated(
             analysis={
                 "insights": [f"No activities found{type_msg} between {start_date} and {end_date}"]
             },
+            surface="query_activities",
+            policy_context={"include_location": include_location},
         )
 
     # Format activities
@@ -106,6 +109,8 @@ async def _query_activities_paginated(
             "unit": unit,
         },
         pagination=pagination,
+        surface="query_activities",
+        policy_context={"include_location": include_location},
     )
 
 
@@ -115,6 +120,7 @@ async def _query_activities_general_paginated(
     cursor: str | None,
     limit: int,
     unit: UnitSystem,
+    include_location: bool,
 ) -> str:
     """Query activities with general pagination (no date filter)."""
     # Parse cursor to get current page
@@ -172,6 +178,8 @@ async def _query_activities_general_paginated(
             },
             pagination=pagination,
             analysis={"insights": [f"No activities found{type_msg}"]},
+            surface="query_activities",
+            policy_context={"include_location": include_location},
         )
 
     # Format activities
@@ -188,6 +196,8 @@ async def _query_activities_general_paginated(
             "unit": unit,
         },
         pagination=pagination,
+        surface="query_activities",
+        policy_context={"include_location": include_location},
     )
 
 
@@ -205,6 +215,10 @@ async def query_activities(
         "Use pagination cursor for large datasets.",
     ] = None,
     activity_type: Annotated[str, "Activity type filter (e.g., 'running', 'cycling')"] = "",
+    include_location: Annotated[
+        bool,
+        "Include exact start/end coordinates; disabled by default because location is sensitive",
+    ] = False,
     unit: Annotated[UnitSystem, "Unit system: 'metric' or 'imperial'"] = "metric",
     ctx: Context | None = None,
 ) -> str:
@@ -281,6 +295,8 @@ async def query_activities(
                     "activity_id": activity_id,
                     "unit": unit,
                 },
+                surface="query_activities",
+                policy_context={"include_location": include_location},
             )
 
         # Pattern 2: Date range query (with pagination)
@@ -293,6 +309,7 @@ async def query_activities(
                 cursor=cursor,
                 limit=limit or 10,
                 unit=unit,
+                include_location=include_location,
             )
 
         # Pattern 3: Specific date query
@@ -319,6 +336,8 @@ async def query_activities(
                         "unit": unit,
                     },
                     analysis={"insights": [f"No activities found{type_msg} for {date_str}"]},
+                    surface="query_activities",
+                    policy_context={"include_location": include_location},
                 )
 
             formatted_activities = [
@@ -336,6 +355,8 @@ async def query_activities(
                     "activity_type": activity_type or "all",
                     "unit": unit,
                 },
+                surface="query_activities",
+                policy_context={"include_location": include_location},
             )
 
         # Pattern 4: Pagination query (general pagination using Garmin's start/limit API)
@@ -347,6 +368,7 @@ async def query_activities(
                 cursor=cursor,
                 limit=limit or 10,
                 unit=unit,
+                include_location=include_location,
             )
 
         # Pattern 5: Last activity (default)
@@ -356,6 +378,8 @@ async def query_activities(
             return ResponseBuilder.build_response(
                 data={"activity": None},
                 analysis={"insights": ["No activities found"]},
+                surface="query_activities",
+                policy_context={"include_location": include_location},
             )
 
         formatted_activity = ResponseBuilder.format_activity(activity, unit)
@@ -363,16 +387,14 @@ async def query_activities(
         return ResponseBuilder.build_response(
             data={"activity": formatted_activity},
             metadata={"query_type": "last_activity", "unit": unit},
+            surface="query_activities",
+            policy_context={"include_location": include_location},
         )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 def _compute_accurate_splits_from_details(
@@ -651,6 +673,10 @@ async def get_activity_details(
     include_hr_zones: Annotated[bool, "Include heart rate zone data"] = True,
     include_gear: Annotated[bool, "Include gear information"] = True,
     include_exercise_sets: Annotated[bool, "Include exercise sets (for strength training)"] = False,
+    include_location: Annotated[
+        bool,
+        "Include exact start/end coordinates; disabled by default because location is sensitive",
+    ] = False,
     unit: Annotated[UnitSystem, "Unit system: 'metric' or 'imperial'"] = "metric",
     ctx: Context | None = None,
 ) -> str:
@@ -789,16 +815,14 @@ async def get_activity_details(
                     "exercise_sets": include_exercise_sets,
                 },
             },
+            surface="get_activity_details",
+            policy_context={"include_location": include_location},
         )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 async def get_activity_social(

@@ -120,13 +120,10 @@ async def query_devices(
                 "solar_start_date": solar_start if include_solar_data else None,
                 "solar_end_date": solar_end if include_solar_data else None,
             },
+            surface="query_devices",
         )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)

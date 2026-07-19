@@ -77,17 +77,13 @@ async def query_gear(
             data=data,
             analysis={"insights": insights} if insights else None,
             metadata={
-                "user_profile_number": profile_number,
                 "gear_uuid": gear_uuid,
                 "includes": {"defaults": include_defaults, "stats": include_stats},
             },
+            surface="query_gear",
         )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)

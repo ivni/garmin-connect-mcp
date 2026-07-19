@@ -6,7 +6,7 @@ from typing import Any
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
-from .client import GarminAPIError
+from .response_builder import ResponseBuilder
 from .session import GarminSessionManager, get_session_manager
 from .write_policy import MUTATION_TOOLS, WritePolicy
 
@@ -27,11 +27,7 @@ class ConfigMiddleware(Middleware):
         try:
             tool_name = context.message.name
             arguments = context.message.arguments or {}
-        except AttributeError as exc:
-            raise ToolError("Unable to resolve the requested tool for authorization.") from exc
-
-        manager = self._session_manager or get_session_manager()
-        try:
+            manager = self._session_manager or get_session_manager()
             operation = self._write_policy.operation_for_call(tool_name, arguments)
             if tool_name in MUTATION_TOOLS:
                 if operation is None:
@@ -41,14 +37,16 @@ class ConfigMiddleware(Middleware):
                 client = manager.get_mutation_client(operation)
             else:
                 client = manager.get_read_client()
-        except GarminAPIError as exc:
-            raise ToolError(exc.message) from exc
 
-        if context.fastmcp_context:
-            await context.fastmcp_context.set_state(
-                "client",
-                client,
-                serializable=False,
-            )
+            if context.fastmcp_context:
+                await context.fastmcp_context.set_state(
+                    "client",
+                    client,
+                    serializable=False,
+                )
 
-        return await call_next(context)
+            return await call_next(context)
+        except ToolError:
+            raise
+        except Exception as exc:
+            raise ToolError(ResponseBuilder.build_exception_response(exc)) from exc

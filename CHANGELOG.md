@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Add a fail-closed response-policy contract for all 26 tools and 3 resources;
+  remove unknown fields, unrelated profile/owner identifiers, device serials,
+  and raw exception text before data reaches the MCP host
+- Exclude exact activity location by default and expose it only through the
+  per-call `include_location=true` option
+
 - Pin `garminconnect==0.3.6` to address CVE-2026-54447 and lock the verified in-memory
   token serialization contract; older versions could create a
   world-readable OAuth token store on multi-user Unix systems
@@ -48,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add response schema `2`, a documented per-surface data-exposure matrix, and
+  stable public error codes with correlation IDs for runtime failures
+
 - Add `auth doctor` to report legacy auth artifacts without exposing their contents
 - Add a fingerprinted `auth migrate` plan that quarantines the deprecated token before the
   separately confirmed `auth migrate --purge` deletion
@@ -55,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and resource against `garminconnect==0.3.6`
 
 ### Changed
+
+- Replace implicit raw Garmin response fields with named domain projections;
+  preserve functionally required activity, workout, gear, and device IDs
+- Keep women's-health data available through its explicit tool without adding a
+  second global opt-in, and keep it out of general resources
 
 - Correct workout, challenge, gear, device, fitness-age, training-effect, weight, body-composition,
   blood-pressure, and hydration calls to the pinned dependency API; encode FIT downloads as Base64

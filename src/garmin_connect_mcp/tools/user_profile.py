@@ -108,15 +108,10 @@ async def get_user_profile(
             data=data,
             analysis=analysis,
             metadata=metadata,
+            surface="get_user_profile",
         )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            message=e.message,
-            error_type="api_error",
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(
-            message=f"Unexpected error: {str(e)}",
-            error_type="internal_error",
-        )
+        return ResponseBuilder.build_exception_response(e)

@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from garmin_connect_mcp.response_builder import ResponseBuilder
 from garmin_connect_mcp.tools.data_management import (
     log_blood_pressure,
     log_body_composition,
@@ -220,3 +221,14 @@ async def test_each_health_tool_uses_its_own_capability_method():
         "timestamp": "2026-07-19T12:00:00",
         "cdate": "2026-07-19",
     }
+
+
+def test_write_projection_replaces_unknown_scalar_result_with_local_acknowledgement():
+    response = ResponseBuilder.build_response(
+        {"result": "CANARY_SECRET upstream acknowledgement"},
+        surface="add_weight_entry",
+    )
+    payload = json.loads(response)
+
+    assert payload["data"]["result"] == {"acknowledged": True}
+    assert "CANARY" not in response

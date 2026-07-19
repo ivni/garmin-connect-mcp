@@ -285,7 +285,7 @@ COMPATIBILITY_MATRIX: dict[str, SurfaceContract] = {
         ),
     ),
     "garmin://training/readiness": SurfaceContract(
-        "resource", (_call("get_stats", "2026-07-19", returns=O),)
+        "resource", (_call("get_training_readiness", "2026-07-19", returns=A),)
     ),
     "garmin://health/today": SurfaceContract(
         "resource", (_call("get_stats", "2026-07-19", returns=O),)

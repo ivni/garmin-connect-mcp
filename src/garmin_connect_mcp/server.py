@@ -256,32 +256,30 @@ mcp.tool(
 async def athlete_profile_resource() -> str:
     """Provide athlete profile with stats and zones for context-aware clients."""
     # Resources don't go through middleware, so use the same shared manager directly.
-    from .client import GarminAPIError
     from .response_builder import ResponseBuilder
     from .session import get_session_manager
 
     try:
         wrapper = get_session_manager().get_read_client()
-    except GarminAPIError as exc:
-        return ResponseBuilder.build_error_response(exc.message)
+        full_name = wrapper.safe_call("get_full_name")
+        unit_system = wrapper.safe_call("get_unit_system")
 
-    # Get basic profile
-    full_name = wrapper.safe_call("get_full_name")
-    unit_system = wrapper.safe_call("get_unit_system")
+        # Garmin 0.3.6 requires an explicit ISO calendar date for both calls.
+        today = get_today_date_string()
+        user_summary = wrapper.safe_call("get_user_summary", today)
+        daily_stats = wrapper.safe_call("get_stats", today)
 
-    # Garmin 0.3.6 requires an explicit ISO calendar date for both calls.
-    today = get_today_date_string()
-    user_summary = wrapper.safe_call("get_user_summary", today)
-    daily_stats = wrapper.safe_call("get_stats", today)
-
-    return ResponseBuilder.build_response(
-        data={
-            "profile": {"name": full_name, "unit_system": unit_system},
-            "summary": user_summary,
-            "stats": daily_stats,
-        },
-        metadata={"resource": "athlete_profile", "date": today},
-    )
+        return ResponseBuilder.build_response(
+            data={
+                "profile": {"name": full_name, "unit_system": unit_system},
+                "summary": user_summary,
+                "stats": daily_stats,
+            },
+            metadata={"resource": "athlete_profile", "date": today},
+            surface="garmin://athlete/profile",
+        )
+    except Exception as exc:
+        return ResponseBuilder.build_exception_response(exc)
 
 
 @mcp.resource(
@@ -292,23 +290,21 @@ async def athlete_profile_resource() -> str:
 )
 async def training_readiness_resource() -> str:
     """Provide current training readiness, Body Battery, and recovery status."""
-    from .client import GarminAPIError
     from .response_builder import ResponseBuilder
     from .session import get_session_manager
 
     try:
         wrapper = get_session_manager().get_read_client()
-    except GarminAPIError as exc:
-        return ResponseBuilder.build_error_response(exc.message)
+        today = get_today_date_string()
+        readiness = wrapper.safe_call("get_training_readiness", today)
 
-    # Garmin 0.3.6 requires an explicit ISO calendar date.
-    today = get_today_date_string()
-    daily_stats = wrapper.safe_call("get_stats", today)
-
-    return ResponseBuilder.build_response(
-        data={"readiness": daily_stats},
-        metadata={"resource": "training_readiness", "date": today},
-    )
+        return ResponseBuilder.build_response(
+            data={"readiness": readiness},
+            metadata={"resource": "training_readiness", "date": today},
+            surface="garmin://training/readiness",
+        )
+    except Exception as exc:
+        return ResponseBuilder.build_exception_response(exc)
 
 
 @mcp.resource(
@@ -319,23 +315,21 @@ async def training_readiness_resource() -> str:
 )
 async def health_today_resource() -> str:
     """Provide today's health snapshot (steps, sleep, stress, HR)."""
-    from .client import GarminAPIError
     from .response_builder import ResponseBuilder
     from .session import get_session_manager
 
     try:
         wrapper = get_session_manager().get_read_client()
-    except GarminAPIError as exc:
-        return ResponseBuilder.build_error_response(exc.message)
+        today = get_today_date_string()
+        daily_stats = wrapper.safe_call("get_stats", today)
 
-    # Garmin 0.3.6 requires an explicit ISO calendar date.
-    today = get_today_date_string()
-    daily_stats = wrapper.safe_call("get_stats", today)
-
-    return ResponseBuilder.build_response(
-        data={"health": daily_stats},
-        metadata={"resource": "health_today", "date": today},
-    )
+        return ResponseBuilder.build_response(
+            data={"health": daily_stats},
+            metadata={"resource": "health_today", "date": today},
+            surface="garmin://health/today",
+        )
+    except Exception as exc:
+        return ResponseBuilder.build_exception_response(exc)
 
 
 # ============================================================================

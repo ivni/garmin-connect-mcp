@@ -45,11 +45,25 @@ tools and resources.
 | `log_hydration` | Tool | `add_hydration_data(volume_ml, timestamp=..., cdate=...)` | Supported, default-off write |
 | `query_womens_health` | Tool | `get_pregnancy_summary`, `get_menstrual_data_for_date`, `get_menstrual_calendar_data` | Supported |
 | `garmin://athlete/profile` | Resource | `get_full_name`, `get_unit_system`, `get_user_summary(date)`, `get_stats(date)` | Supported |
-| `garmin://training/readiness` | Resource | `get_stats(date)` | Supported |
+| `garmin://training/readiness` | Resource | `get_training_readiness(date)` | Supported |
 | `garmin://health/today` | Resource | `get_stats(date)` | Supported |
 
 The exact call samples and return shapes (`object`, `array`, `string`, `number`, `null`, or `binary`)
 live in the executable matrix so documentation cannot substitute for CI enforcement.
+
+## Public response shape
+
+The dependency return shape above describes what the adapter must be able to
+consume, not what the MCP host receives. Every registered surface has a second
+executable contract in `response_policy.contract.EXPOSURE_POLICIES` and a named
+fail-closed projector. Unknown dependency fields are discarded at that
+boundary. Contract tests require the compatibility matrix, FastMCP
+registration, exposure registry, and projector registry to contain the same 26
+tools and 3 resources.
+
+Public responses use schema `2`. See [MCP response data exposure](data-exposure.md)
+for the per-surface data classes, retained operational identifiers, exact
+location opt-in, stable error codes, and schema-1 migration notes.
 
 ## Date and serialization rules
 
@@ -62,3 +76,9 @@ live in the executable matrix so documentation cannot substitute for CI enforcem
   JSON serializable.
 - `get_activity_social` remains registered for a stable public surface, but does not dispatch a
   nonexistent method. It returns the stable `capability_unavailable` error type for version 0.3.6.
+- `query_activities` and `get_activity_details` expose exact location only when
+  their MCP argument `include_location=true`; this response policy does not
+  alter the dependency method signature.
+- Binary FIT download content remains an explicitly requested workout result.
+  Only its Base64 content, media type, encoding, size, and SHA-256 digest cross
+  the public response boundary.

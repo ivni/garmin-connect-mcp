@@ -35,6 +35,7 @@ async def query_womens_health(
             return ResponseBuilder.build_response(
                 data={"pregnancy_summary": summary},
                 metadata={"data_type": "pregnancy"},
+                surface="query_womens_health",
             )
 
         elif data_type == "menstrual":
@@ -50,6 +51,7 @@ async def query_womens_health(
                         "query_type": "single_date",
                         "date": date_str,
                     },
+                    surface="query_womens_health",
                 )
             elif start_date and end_date:
                 # Date range (calendar)
@@ -64,6 +66,7 @@ async def query_womens_health(
                         "start_date": start_date,
                         "end_date": end_date,
                     },
+                    surface="query_womens_health",
                 )
             else:
                 return ResponseBuilder.build_error_response(
@@ -83,6 +86,6 @@ async def query_womens_health(
             )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(e.message, "api_error")
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)

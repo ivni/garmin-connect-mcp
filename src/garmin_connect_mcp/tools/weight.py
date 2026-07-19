@@ -33,12 +33,14 @@ async def query_weight_data(
             return ResponseBuilder.build_response(
                 data={"weigh_ins": weight_data, "date": date_str},
                 metadata={"query_type": "single_date", "date": date_str},
+                surface="query_weight_data",
             )
         elif start_date and end_date:
             weight_data = client.safe_call("get_weigh_ins", start_date, end_date)
             return ResponseBuilder.build_response(
                 data={"weigh_ins": weight_data},
                 metadata={"query_type": "range", "start_date": start_date, "end_date": end_date},
+                surface="query_weight_data",
             )
         else:
             # Default to today
@@ -47,14 +49,13 @@ async def query_weight_data(
             return ResponseBuilder.build_response(
                 data={"weigh_ins": weight_data, "date": date_str},
                 metadata={"query_type": "single_date", "date": date_str},
+                surface="query_weight_data",
             )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message, "api_error", ["Check your Garmin Connect credentials"]
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 async def add_weight_entry(
@@ -82,6 +83,7 @@ async def add_weight_entry(
                 data={"preview": preview},
                 analysis={"insights": ["Dry-run only; Garmin was not contacted"]},
                 metadata={"dry_run": True, "capability": "weight.write"},
+                surface="add_weight_entry",
             )
         _require_idempotency_key(idempotency_key)
         assert ctx is not None
@@ -101,13 +103,14 @@ async def add_weight_entry(
                 "capability": "weight.write",
                 "idempotency_key": idempotency_key,
             },
+            surface="add_weight_entry",
         )
     except ValueError as e:
         return ResponseBuilder.build_error_response(str(e), "invalid_parameters")
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(e.message, "api_error")
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 async def delete_weight_entries(
@@ -143,6 +146,7 @@ async def delete_weight_entries(
                 data={"preview": preview},
                 analysis={"insights": ["Dry-run only; Garmin was not contacted"]},
                 metadata={"dry_run": True, "capability": "weight.delete"},
+                surface="delete_weight_entries",
             )
         if confirmation != required_confirmation:
             raise ValueError(
@@ -166,13 +170,14 @@ async def delete_weight_entries(
                 "capability": "weight.delete",
                 "idempotency_key": idempotency_key,
             },
+            surface="delete_weight_entries",
         )
     except ValueError as e:
         return ResponseBuilder.build_error_response(str(e), "invalid_parameters")
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(e.message, "api_error")
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 def _entry_date(value: str | None) -> str:

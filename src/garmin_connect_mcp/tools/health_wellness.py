@@ -215,22 +215,20 @@ async def query_health_summary(
                 analysis={"insights": insights} if insights else None,
                 metadata={"start_date": dates[0], "end_date": dates[-1], "unit": unit},
                 pagination=pagination,
+                surface="query_health_summary",
             )
         else:
             return ResponseBuilder.build_response(
                 data=summaries[0] if summaries else {},
                 analysis={"insights": insights} if insights else None,
                 metadata={"date": dates[0] if dates else None, "unit": unit},
+                surface="query_health_summary",
             )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 async def query_sleep_data(
@@ -289,6 +287,7 @@ async def query_sleep_data(
                 data={"sleep_data": []},
                 analysis={"insights": ["No sleep data found for the specified period"]},
                 metadata={"dates": dates},
+                surface="query_sleep_data",
             )
 
         # Generate insights
@@ -324,22 +323,20 @@ async def query_sleep_data(
                 data={"sleep_data": sleep_data, "count": len(sleep_data)},
                 analysis={"insights": insights} if insights else None,
                 metadata={"start_date": dates[0], "end_date": dates[-1]},
+                surface="query_sleep_data",
             )
         else:
             return ResponseBuilder.build_response(
                 data=sleep_data[0] if sleep_data else {},
                 analysis={"insights": insights} if insights else None,
                 metadata={"date": dates[0] if dates else None},
+                surface="query_sleep_data",
             )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 async def query_heart_rate_data(
@@ -418,22 +415,20 @@ async def query_heart_rate_data(
                 data={"heart_rate_data": hr_data, "count": len(hr_data)},
                 analysis={"insights": insights} if insights else None,
                 metadata={"start_date": dates[0], "end_date": dates[-1]},
+                surface="query_heart_rate_data",
             )
         else:
             return ResponseBuilder.build_response(
                 data=hr_data[0] if hr_data else {},
                 analysis={"insights": insights} if insights else None,
                 metadata={"date": dates[0] if dates else None},
+                surface="query_heart_rate_data",
             )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 async def query_activity_metrics(
@@ -583,6 +578,7 @@ async def query_activity_metrics(
                     "requested_metrics": requested_metrics,
                     "unit": unit,
                 },
+                surface="query_activity_metrics",
             )
         else:
             return ResponseBuilder.build_response(
@@ -593,13 +589,10 @@ async def query_activity_metrics(
                     "requested_metrics": requested_metrics,
                     "unit": unit,
                 },
+                surface="query_activity_metrics",
             )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)

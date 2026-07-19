@@ -67,6 +67,7 @@ async def analyze_training_period(
                 },
                 analysis={"insights": ["No activities found in this period"]},
                 metadata={"period": period, "activity_type": activity_type or "all"},
+                surface="analyze_training_period",
             )
 
         # Calculate summary metrics
@@ -220,16 +221,13 @@ async def analyze_training_period(
             data=data,
             analysis={"insights": insights},
             metadata={"period": period, "activity_type": activity_type or "all", "unit": unit},
+            surface="analyze_training_period",
         )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 async def get_performance_metrics(
@@ -333,16 +331,13 @@ async def get_performance_metrics(
             data=metrics_data,
             analysis={"insights": insights} if insights else None,
             metadata=metadata,
+            surface="get_performance_metrics",
         )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 async def get_training_effect(
@@ -384,6 +379,7 @@ async def get_training_effect(
                     ]
                 },
                 metadata={"activity_id": activity_id, "source_method": "get_activity"},
+                surface="get_training_effect",
             )
 
         # Pattern 2: Progress summary
@@ -395,6 +391,7 @@ async def get_training_effect(
             return ResponseBuilder.build_response(
                 data={"progress_summary": summary},
                 metadata={"start_date": start_date, "end_date": end_date, "metric": metric},
+                surface="get_training_effect",
             )
 
         else:
@@ -408,10 +405,6 @@ async def get_training_effect(
             )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)

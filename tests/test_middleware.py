@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -78,12 +79,18 @@ async def test_middleware_injects_read_only_manager_client():
 
 @pytest.mark.asyncio
 async def test_middleware_exposes_actionable_auth_error():
-    manager = FakeManager(error=GarminAuthenticationError("token missing"))
+    manager = FakeManager(error=GarminAuthenticationError("CANARY_SECRET token missing"))
     middleware = ConfigMiddleware(manager)  # type: ignore[arg-type]
     context = tool_context("query_weight_data")
 
-    with pytest.raises(ToolError, match="token missing"):
+    with pytest.raises(ToolError) as caught:
         await middleware.on_call_tool(context, lambda _context: None)  # type: ignore[arg-type]
+
+    payload = json.loads(str(caught.value))
+    assert payload["error"]["code"] == "AUTH_REQUIRED"
+    assert payload["error"]["request_id"].startswith("err-")
+    assert payload["metadata"]["response_schema"] == "2"
+    assert "CANARY" not in str(caught.value)
 
 
 @pytest.mark.asyncio
@@ -92,9 +99,12 @@ async def test_disabled_write_fails_before_any_client_is_requested():
     middleware = ConfigMiddleware(manager, WritePolicy())  # type: ignore[arg-type]
     context = tool_context("add_weight_entry", {"dry_run": False})
 
-    with pytest.raises(ToolError, match="weight.write.*disabled"):
+    with pytest.raises(ToolError) as caught:
         await middleware.on_call_tool(context, lambda _context: None)  # type: ignore[arg-type]
 
+    payload = json.loads(str(caught.value))
+    assert payload["error"]["code"] == "CAPABILITY_UNAVAILABLE"
+    assert "disabled by server policy" in payload["error"]["message"]
     assert manager.read_calls == 0
     assert manager.mutation_calls == []
 
@@ -108,9 +118,11 @@ async def test_enabling_one_capability_does_not_enable_another():
     )
     context = tool_context("log_hydration", {"dry_run": False})
 
-    with pytest.raises(ToolError, match="health.hydration.*disabled"):
+    with pytest.raises(ToolError) as caught:
         await middleware.on_call_tool(context, lambda _context: None)  # type: ignore[arg-type]
 
+    payload = json.loads(str(caught.value))
+    assert payload["error"]["code"] == "CAPABILITY_UNAVAILABLE"
     assert manager.read_calls == 0
     assert manager.mutation_calls == []
 
@@ -171,7 +183,32 @@ async def test_real_fastmcp_call_uses_direct_call_tool_params():
     result = await app.call_tool("add_weight_entry", {"dry_run": True})
 
     assert result.content[0].text == "preview"  # type: ignore[union-attr]
-    with pytest.raises(ToolError, match="weight.write.*disabled"):
+    with pytest.raises(ToolError) as caught:
         await app.call_tool("add_weight_entry", {"dry_run": False})
+    payload = json.loads(str(caught.value))
+    assert payload["error"]["code"] == "CAPABILITY_UNAVAILABLE"
+    assert payload["metadata"]["response_schema"] == "2"
     assert manager.read_calls == 0
     assert manager.mutation_calls == []
+
+
+@pytest.mark.asyncio
+async def test_real_fastmcp_call_sanitizes_unexpected_middleware_failure():
+    manager = FakeManager(error=RuntimeError("CANARY_SECRET middleware failure"))
+    app = FastMCP("middleware-error-contract")
+    app.add_middleware(
+        ConfigMiddleware(manager, WritePolicy())  # type: ignore[arg-type]
+    )
+
+    @app.tool
+    async def query_weight_data() -> str:
+        return "unreachable"
+
+    with pytest.raises(ToolError) as caught:
+        await app.call_tool("query_weight_data", {})
+
+    payload = json.loads(str(caught.value))
+    assert payload["error"]["code"] == "INTERNAL_ERROR"
+    assert payload["error"]["request_id"].startswith("err-")
+    assert payload["metadata"]["response_schema"] == "2"
+    assert "CANARY" not in str(caught.value)

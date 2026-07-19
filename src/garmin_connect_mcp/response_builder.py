@@ -1,6 +1,7 @@
 """Response builder for structured Garmin Connect MCP responses."""
 
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -17,6 +18,15 @@ def _convert_datetimes(obj: Any) -> Any:  # type: ignore[misc]
     elif isinstance(obj, list):
         return [_convert_datetimes(item) for item in obj]  # type: ignore[misc]
     return obj
+
+
+def _contains_key(obj: Any, key: str) -> bool:
+    """Return whether a projected response tree contains a mapping key."""
+    if isinstance(obj, Mapping):
+        return key in obj or any(_contains_key(value, key) for value in obj.values())
+    if isinstance(obj, list):
+        return any(_contains_key(value, key) for value in obj)
+    return False
 
 
 class ResponseBuilder:
@@ -65,6 +75,9 @@ class ResponseBuilder:
         analysis: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         pagination: PaginationInfo | dict[str, Any] | None = None,
+        *,
+        surface: str | None = None,
+        policy_context: Mapping[str, object] | None = None,
     ) -> str:
         """
         Build a structured response with data, optional analysis, and metadata.
@@ -78,8 +91,14 @@ class ResponseBuilder:
         Returns:
             JSON string with structured response
         """
+        public_data: Any = data
+        if surface is not None:
+            from .response_policy import project_surface_data
+
+            public_data = project_surface_data(surface, data, policy_context)
+
         # Convert datetime objects to ISO strings
-        converted_data = cast(JSONSerializable, _convert_datetimes(data))
+        converted_data = cast(JSONSerializable, _convert_datetimes(public_data))
         converted_analysis: dict[str, Any] | None = None
         if analysis:
             converted_analysis = cast(dict[str, Any], _convert_datetimes(analysis))
@@ -93,8 +112,16 @@ class ResponseBuilder:
             response["pagination"] = pagination
 
         # Build metadata with timestamp
-        meta = metadata or {}
+        meta = dict(metadata or {})
         converted_meta = cast(dict[str, Any], _convert_datetimes(meta))
+        converted_meta["response_schema"] = "2"
+        if (
+            surface in {"query_activities", "get_activity_details"}
+            and policy_context
+            and policy_context.get("include_location") is True
+            and _contains_key(public_data, "location")
+        ):
+            converted_meta["precise_location"] = True
         converted_meta["fetched_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
         response["metadata"] = converted_meta
@@ -103,7 +130,11 @@ class ResponseBuilder:
 
     @staticmethod
     def build_error_response(
-        message: str, error_type: str = "error", suggestions: list[str] | None = None
+        message: str,
+        error_type: str = "error",
+        suggestions: list[str] | None = None,
+        code: str | None = None,
+        request_id: str | None = None,
     ) -> str:
         """
         Build a structured error response.
@@ -116,18 +147,38 @@ class ResponseBuilder:
         Returns:
             JSON string with error response
         """
+        from .response_policy.errors import default_error_code
+
         response: dict[str, Any] = {
             "error": {
+                "code": code or default_error_code(error_type),
                 "type": error_type,
                 "message": message,
                 "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-            }
+            },
+            "metadata": {"response_schema": "2"},
         }
+
+        if request_id:
+            response["error"]["request_id"] = request_id
 
         if suggestions:
             response["error"]["suggestions"] = suggestions
 
         return json.dumps(response, separators=(",", ":"))
+
+    @staticmethod
+    def build_exception_response(error: Exception) -> str:
+        """Build a stable public error without exposing ``str(error)``."""
+        from .response_policy.errors import public_error_for_exception
+
+        public = public_error_for_exception(error)
+        return ResponseBuilder.build_error_response(
+            public.message,
+            public.error_type,
+            code=public.code,
+            request_id=public.request_id,
+        )
 
     @staticmethod
     def format_activity(

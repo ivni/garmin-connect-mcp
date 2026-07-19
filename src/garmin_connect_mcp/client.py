@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 class GarminAPIError(Exception):
     """Custom exception for Garmin API errors."""
 
+    public_code = "GARMIN_UPSTREAM_UNAVAILABLE"
+
     def __init__(self, message: str, original_error: Exception | None = None):
         self.message = message
         self.original_error = original_error
@@ -35,6 +37,8 @@ class GarminAPIError(Exception):
 
 class GarminRateLimitError(GarminAPIError):
     """Exception raised when rate limit is exceeded (HTTP 429)."""
+
+    public_code = "RATE_LIMITED"
 
     def __init__(self, original_error: Exception | None = None):
         super().__init__(
@@ -46,6 +50,8 @@ class GarminRateLimitError(GarminAPIError):
 class GarminNotFoundError(GarminAPIError):
     """Exception raised when resource is not found (HTTP 404)."""
 
+    public_code = "NOT_FOUND"
+
     def __init__(self, resource: str = "Resource", original_error: Exception | None = None):
         super().__init__(
             f"{resource} not found. Please check the ID or date and try again.",
@@ -55,6 +61,8 @@ class GarminNotFoundError(GarminAPIError):
 
 class GarminAuthenticationError(GarminAPIError):
     """Exception raised when authentication fails (HTTP 401/403)."""
+
+    public_code = "AUTH_REQUIRED"
 
     def __init__(
         self,
@@ -70,17 +78,25 @@ class GarminAuthenticationError(GarminAPIError):
 class GarminMethodNotAllowedError(GarminAPIError):
     """Raised when a restricted facade is asked to call an unapproved method."""
 
+    public_code = "CAPABILITY_UNAVAILABLE"
+
 
 class GarminMethodUnavailableError(GarminAPIError):
     """Raised when the underlying Garmin client lacks a method before dispatch."""
+
+    public_code = "CAPABILITY_UNAVAILABLE"
 
 
 class GarminMutationOutcomeUnknownError(GarminAPIError):
     """Raised when Garmin may have committed a mutation without confirming it."""
 
+    public_code = "GARMIN_UPSTREAM_UNAVAILABLE"
+
 
 class GarminMutationInProgressError(GarminAPIError):
     """Raised when another process still owns the serialized mutation transaction."""
+
+    public_code = "GARMIN_UPSTREAM_UNAVAILABLE"
 
 
 @dataclass(frozen=True)
@@ -480,11 +496,14 @@ class GarminClientWrapper:
                     self._on_authentication_error()
                 raise GarminAuthenticationError(original_error=e) from e
             else:
-                raise GarminAPIError(f"Garmin API error: {str(e)}", original_error=e) from e
+                raise GarminAPIError(
+                    "Garmin Connect could not complete the request. Try again later.",
+                    original_error=e,
+                ) from e
         except GarminAPIError:
             raise
         except Exception as e:
-            raise GarminAPIError(f"Unexpected error: {str(e)}", original_error=e) from e
+            raise GarminAPIError("Garmin returned an unexpected response.", original_error=e) from e
 
     def _run_after_call(self) -> None:
         """Persist refresh state without hiding an already completed API call."""
@@ -498,8 +517,8 @@ class GarminClientWrapper:
             # housekeeping error would invite an unsafe retry or duplicate.
             logger.warning(
                 "Garmin API call completed, but refreshed-token persistence failed; "
-                "the cached session was invalidated: %s",
-                exc,
+                "the cached session was invalidated error_class=%s",
+                type(exc).__name__,
             )
 
     def _assert_active(self) -> None:

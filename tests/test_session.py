@@ -334,9 +334,14 @@ def test_persistence_failure_does_not_mask_original_api_error(monkeypatch, tmp_p
 
     monkeypatch.setattr(TokenStore, "compare_and_replace", fail_persistence)
 
-    with pytest.raises(GarminAPIError, match="remote operation failed"):
+    with pytest.raises(
+        GarminAPIError,
+        match="Garmin Connect could not complete the request",
+    ) as caught:
         wrapper.safe_call("failing_refresh_probe", "refreshed-before-error")
 
+    assert caught.value.original_error is not None
+    assert "remote operation failed" in str(caught.value.original_error)
     assert "persistence failed" in caplog.text
 
 
@@ -357,7 +362,8 @@ def test_unexpected_persistence_failure_revokes_before_next_network_call(
     monkeypatch.setattr(factory.instances[0].client, "dumps", fail_dump)
 
     assert wrapper.safe_call("account_probe") == "old"
-    assert "unexpected serialization failure" in caplog.text
+    assert "error_class=GarminAPIError" in caplog.text
+    assert "unexpected serialization failure" not in caplog.text
     with pytest.raises(GarminAuthenticationError, match="revoked"):
         wrapper.safe_call("account_probe")
     assert factory.remote_calls == 1

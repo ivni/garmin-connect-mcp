@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-from .client import GarminAPIError, MutationOperation
+from .client import GarminMethodNotAllowedError, MutationOperation
 
 WRITE_CAPABILITIES_ENV = "GARMIN_WRITE_CAPABILITIES"
 
@@ -160,7 +160,7 @@ class WritePolicy:
         if operation is None or arguments.get("dry_run", True) is not False:
             return None
         if operation.capability not in self.enabled_capabilities:
-            raise GarminAPIError(
+            raise GarminMethodNotAllowedError(
                 f"Garmin write capability '{operation.capability}' is disabled. "
                 f"Set {WRITE_CAPABILITIES_ENV} to an explicit comma-separated capability list "
                 "when starting the server."

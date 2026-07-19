@@ -239,16 +239,13 @@ async def compare_activities(
             data={"activities": activities, "comparison": comparison, "count": len(activities)},
             analysis={"insights": insights},
             metadata={"activity_ids": ids, "unit": unit},
+            surface="compare_activities",
         )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)
 
 
 async def find_similar_activities(
@@ -338,6 +335,7 @@ async def find_similar_activities(
                 },
                 analysis={"insights": ["No activities available to compare"]},
                 metadata={"reference_activity_id": activity_id, "criteria": criteria_list},
+                surface="find_similar_activities",
             )
 
         # Filter and score activities
@@ -468,13 +466,10 @@ async def find_similar_activities(
                 "limit": limit,
                 "unit": unit,
             },
+            surface="find_similar_activities",
         )
 
     except GarminAPIError as e:
-        return ResponseBuilder.build_error_response(
-            e.message,
-            "api_error",
-            ["Check your Garmin Connect credentials", "Verify your internet connection"],
-        )
+        return ResponseBuilder.build_exception_response(e)
     except Exception as e:
-        return ResponseBuilder.build_error_response(str(e), "internal_error")
+        return ResponseBuilder.build_exception_response(e)

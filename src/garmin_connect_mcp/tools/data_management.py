@@ -38,6 +38,7 @@ async def log_body_composition(
         body_water = _bounded_number(params, "body_water", 0, 100)
         date_str = _entry_date(date)
         return await _execute_health_write(
+            surface_name="log_body_composition",
             method_name="add_body_composition",
             capability="health.body_composition",
             date=date_str,
@@ -56,9 +57,9 @@ async def log_body_composition(
     except ValueError as exc:
         return ResponseBuilder.build_error_response(str(exc), "invalid_parameters")
     except GarminAPIError as exc:
-        return ResponseBuilder.build_error_response(exc.message, "api_error")
+        return ResponseBuilder.build_exception_response(exc)
     except Exception as exc:
-        return ResponseBuilder.build_error_response(str(exc), "internal_error")
+        return ResponseBuilder.build_exception_response(exc)
 
 
 async def log_blood_pressure(
@@ -87,6 +88,7 @@ async def log_blood_pressure(
             raise ValueError("diastolic must be lower than systolic")
         date_str = _entry_date(date)
         return await _execute_health_write(
+            surface_name="log_blood_pressure",
             method_name="set_blood_pressure",
             capability="health.blood_pressure",
             date=date_str,
@@ -100,9 +102,9 @@ async def log_blood_pressure(
     except ValueError as exc:
         return ResponseBuilder.build_error_response(str(exc), "invalid_parameters")
     except GarminAPIError as exc:
-        return ResponseBuilder.build_error_response(exc.message, "api_error")
+        return ResponseBuilder.build_exception_response(exc)
     except Exception as exc:
-        return ResponseBuilder.build_error_response(str(exc), "internal_error")
+        return ResponseBuilder.build_exception_response(exc)
 
 
 async def log_hydration(
@@ -124,6 +126,7 @@ async def log_hydration(
         volume_ml = _bounded_number(params, "volume_ml", 1, 5000, required=True)
         date_str = _entry_date(date)
         return await _execute_health_write(
+            surface_name="log_hydration",
             method_name="add_hydration_data",
             capability="health.hydration",
             date=date_str,
@@ -140,13 +143,14 @@ async def log_hydration(
     except ValueError as exc:
         return ResponseBuilder.build_error_response(str(exc), "invalid_parameters")
     except GarminAPIError as exc:
-        return ResponseBuilder.build_error_response(exc.message, "api_error")
+        return ResponseBuilder.build_exception_response(exc)
     except Exception as exc:
-        return ResponseBuilder.build_error_response(str(exc), "internal_error")
+        return ResponseBuilder.build_exception_response(exc)
 
 
 async def _execute_health_write(
     *,
+    surface_name: str,
     method_name: str,
     capability: str,
     date: str,
@@ -163,6 +167,7 @@ async def _execute_health_write(
             data={"preview": preview},
             analysis={"insights": ["Dry-run only; Garmin was not contacted"]},
             metadata={"dry_run": True, "capability": capability},
+            surface=surface_name,
         )
     if idempotency_key is None:
         raise ValueError("idempotency_key is required when dry_run is false")
@@ -182,6 +187,7 @@ async def _execute_health_write(
             "capability": capability,
             "idempotency_key": idempotency_key,
         },
+        surface=surface_name,
     )
 
 
