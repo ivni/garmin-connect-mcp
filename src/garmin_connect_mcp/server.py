@@ -26,7 +26,11 @@ from .tools.challenges import (
     query_challenges,
     query_goals_and_records,
 )
-from .tools.data_management import log_health_data
+from .tools.data_management import (
+    log_blood_pressure,
+    log_body_composition,
+    log_hydration,
+)
 from .tools.devices import query_devices
 from .tools.gear import query_gear
 from .tools.health_wellness import (
@@ -41,9 +45,9 @@ from .tools.training import (
     get_training_effect,
 )
 from .tools.user_profile import get_user_profile
-from .tools.weight import manage_weight_data, query_weight_data
+from .tools.weight import add_weight_entry, delete_weight_entries, query_weight_data
 from .tools.womens_health import query_womens_health
-from .tools.workouts import manage_workouts
+from .tools.workouts import query_workouts, upload_workout
 
 # Register activity tools
 mcp.tool(
@@ -173,17 +177,33 @@ mcp.tool(
         "readOnlyHint": False,
         "openWorldHint": False,
         "destructiveHint": False,
+        "idempotentHint": False,
     }
-)(manage_weight_data)
+)(add_weight_entry)
+mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "openWorldHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+    }
+)(delete_weight_entries)
 
 # Register workout tools
+mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "openWorldHint": False,
+    }
+)(query_workouts)
 mcp.tool(
     annotations={
         "readOnlyHint": False,
         "openWorldHint": False,
         "destructiveHint": False,
+        "idempotentHint": False,
     }
-)(manage_workouts)
+)(upload_workout)
 
 # Register data management tools
 mcp.tool(
@@ -191,8 +211,25 @@ mcp.tool(
         "readOnlyHint": False,
         "openWorldHint": False,
         "destructiveHint": False,
+        "idempotentHint": False,
     }
-)(log_health_data)
+)(log_body_composition)
+mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "openWorldHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+    }
+)(log_blood_pressure)
+mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "openWorldHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+    }
+)(log_hydration)
 
 # Register women's health tools
 mcp.tool(
@@ -222,7 +259,7 @@ async def athlete_profile_resource() -> str:
     from .session import get_session_manager
 
     try:
-        wrapper = get_session_manager().get_client()
+        wrapper = get_session_manager().get_read_client()
     except GarminAPIError as exc:
         return ResponseBuilder.build_error_response(exc.message)
 
@@ -257,7 +294,7 @@ async def training_readiness_resource() -> str:
     from .session import get_session_manager
 
     try:
-        wrapper = get_session_manager().get_client()
+        wrapper = get_session_manager().get_read_client()
     except GarminAPIError as exc:
         return ResponseBuilder.build_error_response(exc.message)
 
@@ -283,7 +320,7 @@ async def health_today_resource() -> str:
     from .session import get_session_manager
 
     try:
-        wrapper = get_session_manager().get_client()
+        wrapper = get_session_manager().get_read_client()
     except GarminAPIError as exc:
         return ResponseBuilder.build_error_response(exc.message)
 

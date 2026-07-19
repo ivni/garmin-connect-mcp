@@ -131,8 +131,8 @@ def test_runtime_loads_tokens_inline_without_dependency_disk_writer(tmp_path: Pa
     factory = FakeGarminFactory()
     manager = build_manager(store, factory)
 
-    first = manager.get_client()
-    second = manager.get_client()
+    first = manager._get_client()
+    second = manager._get_client()
 
     assert first is second
     assert len(factory.instances) == 1
@@ -184,10 +184,10 @@ def test_runtime_reloads_when_external_process_replaces_generation(tmp_path: Pat
     store.replace_payload(token_payload("first"))
     factory = FakeGarminFactory()
     manager = build_manager(store, factory)
-    first = manager.get_client()
+    first = manager._get_client()
 
     store.replace_payload(token_payload("external"))
-    second = manager.get_client()
+    second = manager._get_client()
 
     assert second is not first
     assert len(factory.instances) == 2
@@ -205,7 +205,7 @@ def test_runtime_retries_if_generation_changes_during_unchanged_login(tmp_path: 
     factory.after_runtime_login = replace_during_login
     manager = build_manager(store, factory)
 
-    wrapper = manager.get_client()
+    wrapper = manager._get_client()
 
     assert len(factory.instances) == 2
     assert factory.instances[0].client.label == "first"
@@ -219,7 +219,7 @@ def test_runtime_does_not_fall_back_when_token_is_missing(tmp_path: Path):
     manager = build_manager(store, factory)
 
     with pytest.raises(GarminAuthenticationError, match="No secure, valid Garmin token store"):
-        manager.get_client()
+        manager._get_client()
 
     assert factory.instances == []
 
@@ -229,7 +229,7 @@ def test_shared_wrapper_serializes_concurrent_client_calls(tmp_path: Path):
     store.replace_payload(token_payload("valid"))
     factory = FakeGarminFactory()
     manager = build_manager(store, factory)
-    wrapper = manager.get_client()
+    wrapper = manager._get_client()
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         results = list(
@@ -245,7 +245,7 @@ def test_runtime_refresh_is_persisted_through_atomic_canonical_writer(tmp_path: 
     store.replace_payload(token_payload("old"))
     factory = FakeGarminFactory()
     manager = build_manager(store, factory)
-    wrapper = manager.get_client()
+    wrapper = manager._get_client()
 
     result = wrapper.safe_call("refresh_probe", "refreshed")
 
@@ -258,7 +258,7 @@ def test_generation_replacement_between_calls_revokes_wrapper_before_network(tmp
     store.replace_payload(token_payload("old"))
     factory = FakeGarminFactory()
     manager = build_manager(store, factory)
-    wrapper = manager.get_client()
+    wrapper = manager._get_client()
 
     assert wrapper.safe_call("account_probe") == "old"
     store.replace_payload(token_payload("external"))
@@ -278,7 +278,7 @@ def test_successful_mutation_is_not_masked_by_mid_call_generation_conflict(
     store.replace_payload(token_payload("old"))
     factory = FakeGarminFactory()
     manager = build_manager(store, factory)
-    stale_wrapper = manager.get_client()
+    stale_wrapper = manager._get_client()
 
     def replace_during_call() -> None:
         store.replace_payload(token_payload("external"))
@@ -289,7 +289,7 @@ def test_successful_mutation_is_not_masked_by_mid_call_generation_conflict(
 
     assert result == "refreshed"
     assert json.loads(store.read_snapshot().payload)["di_refresh_token"] == "refresh-external"
-    assert manager.get_client() is not stale_wrapper
+    assert manager._get_client() is not stale_wrapper
     assert "persistence failed" in caplog.text
     with pytest.raises(GarminAuthenticationError, match="revoked"):
         stale_wrapper.safe_call("account_probe")
@@ -303,7 +303,7 @@ def test_successful_mutation_is_not_masked_by_persistence_io_failure(
     store.replace_payload(token_payload("old"))
     factory = FakeGarminFactory()
     manager = build_manager(store, factory)
-    wrapper = manager.get_client()
+    wrapper = manager._get_client()
 
     def fail_persistence(_self, _payload, expected_fingerprint):
         assert expected_fingerprint
@@ -326,7 +326,7 @@ def test_persistence_failure_does_not_mask_original_api_error(monkeypatch, tmp_p
     store.replace_payload(token_payload("old"))
     factory = FakeGarminFactory()
     manager = build_manager(store, factory)
-    wrapper = manager.get_client()
+    wrapper = manager._get_client()
 
     def fail_persistence(_self, _payload, expected_fingerprint):
         assert expected_fingerprint
@@ -349,7 +349,7 @@ def test_unexpected_persistence_failure_revokes_before_next_network_call(
     store.replace_payload(token_payload("old"))
     factory = FakeGarminFactory()
     manager = build_manager(store, factory)
-    wrapper = manager.get_client()
+    wrapper = manager._get_client()
 
     def fail_dump() -> str:
         raise ValueError("unexpected serialization failure")
@@ -361,7 +361,7 @@ def test_unexpected_persistence_failure_revokes_before_next_network_call(
     with pytest.raises(GarminAuthenticationError, match="revoked"):
         wrapper.safe_call("account_probe")
     assert factory.remote_calls == 1
-    assert manager.get_client() is not wrapper
+    assert manager._get_client() is not wrapper
 
 
 def test_bootstrap_atomically_commits_ephemeral_credentials(tmp_path: Path):

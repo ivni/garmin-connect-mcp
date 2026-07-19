@@ -10,18 +10,30 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from garminconnect import Garmin, GarminConnectConnectionError
 
 TOKEN_FILENAME = "garmin_tokens.json"
 LOCK_FILENAME = ".garmin_tokens.lock"
 QUARANTINE_FILENAME = ".legacy-token-quarantine.json"
+MUTATION_LEDGER_FILENAME = ".garmin-mutations.json"
+MUTATION_STAGING_FILENAME = ".garmin-mutations.tmp"
+MUTATION_LOCK_FILENAME = ".garmin-mutations.lock"
 MAX_TOKEN_BYTES = 64 * 1024
+MAX_MUTATION_LEDGER_BYTES = 512 * 1024
 REQUIRED_TOKEN_FIELDS = ("di_token", "di_refresh_token", "di_client_id")
-DEDICATED_STORE_ENTRIES = {TOKEN_FILENAME, LOCK_FILENAME, QUARANTINE_FILENAME}
+DEDICATED_STORE_ENTRIES = {
+    TOKEN_FILENAME,
+    LOCK_FILENAME,
+    QUARANTINE_FILENAME,
+    MUTATION_LEDGER_FILENAME,
+    MUTATION_STAGING_FILENAME,
+    MUTATION_LOCK_FILENAME,
+}
 
 
 class TokenStoreError(RuntimeError):
@@ -30,6 +42,10 @@ class TokenStoreError(RuntimeError):
 
 class TokenStoreConflict(TokenStoreError):
     """Raised when another process replaced the canonical token generation."""
+
+
+class TokenStoreLockTimeout(TokenStoreError):
+    """Raised when another process still owns a protected store transaction."""
 
 
 @dataclass(frozen=True)
@@ -105,6 +121,35 @@ class TokenStore:
     def token_file(self) -> Path:
         """Return the canonical token file."""
         return self.directory / TOKEN_FILENAME
+
+    @property
+    def mutation_ledger_file(self) -> Path:
+        """Return the protected mutation-idempotency ledger path."""
+        return self.directory / MUTATION_LEDGER_FILENAME
+
+    @contextlib.contextmanager
+    def mutation_transaction(self) -> Iterator[None]:
+        """Serialize a mutation reservation, remote call, and final ledger state."""
+        self.ensure_directory()
+        with self._exclusive_file_lock(
+            self.directory / MUTATION_LOCK_FILENAME,
+            "mutation journal",
+        ):
+            self._assert_dedicated_contents(allow_temporary_tokens=True)
+            yield
+
+    def update_mutation_records(
+        self,
+        update: Callable[[dict[str, dict[str, str]]], tuple[Any, bool]],
+    ) -> Any:
+        """Atomically inspect and optionally replace non-secret mutation tombstones."""
+        with self.mutation_transaction():
+            self._assert_dedicated_contents(allow_temporary_tokens=True)
+            records = self._read_mutation_records_unlocked()
+            result, changed = update(records)
+            if changed:
+                self._write_mutation_records_unlocked(records)
+            return result
 
     def exists(self) -> bool:
         """Return whether a structurally usable canonical token exists."""
@@ -393,6 +438,134 @@ class TokenStore:
             raise TokenStoreError(
                 f"Could not establish owner-only token-artifact protection: {absolute}"
             )
+
+    def _read_mutation_records_unlocked(self) -> dict[str, dict[str, str]]:
+        path = self.mutation_ledger_file
+        if not os.path.lexists(path):
+            return {}
+        metadata = self._assert_regular_non_redirect(path)
+        self._assert_current_owner(path)
+        if not self.external_artifact_permissions_secure(path):
+            raise TokenStoreError(f"Mutation ledger is not owner-only: {path}")
+
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        if os.name == "nt":
+            from .windows_io import open_shared_read
+
+            descriptor = open_shared_read(path)
+        else:
+            descriptor = os.open(path, flags)
+        try:
+            opened_metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened_metadata.st_mode)
+                or opened_metadata.st_nlink != 1
+                or not self._same_file(metadata, opened_metadata)
+            ):
+                raise TokenStoreError(f"Mutation ledger changed while opening: {path}")
+            payload = self._read_bounded(
+                descriptor,
+                path,
+                MAX_MUTATION_LEDGER_BYTES,
+                "Mutation ledger",
+            ).decode("utf-8")
+        except UnicodeError as exc:
+            raise TokenStoreError(f"Mutation ledger is not UTF-8 JSON: {path}") from exc
+        finally:
+            os.close(descriptor)
+
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise TokenStoreError(f"Mutation ledger is not valid JSON: {path}") from exc
+        if (
+            not isinstance(parsed, dict)
+            or parsed.get("version") != 1
+            or not isinstance(parsed.get("records"), dict)
+        ):
+            raise TokenStoreError(f"Mutation ledger schema is invalid: {path}")
+        records = parsed["records"]
+        self._validate_mutation_records(records)
+        return records
+
+    def _write_mutation_records_unlocked(self, records: dict[str, dict[str, str]]) -> None:
+        self._validate_mutation_records(records)
+        payload = json.dumps(
+            {"version": 1, "records": records},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(payload) > MAX_MUTATION_LEDGER_BYTES:
+            raise TokenStoreError(f"Mutation ledger exceeds {MAX_MUTATION_LEDGER_BYTES} bytes")
+
+        target = self.mutation_ledger_file
+        staging = self.directory / MUTATION_STAGING_FILENAME
+        if os.path.lexists(target):
+            self._assert_regular_non_redirect(target)
+            self._assert_current_owner(target)
+            self._harden_path(target, directory=False)
+            if not self.external_artifact_permissions_secure(target):
+                raise TokenStoreError(f"Could not harden mutation ledger: {target}")
+        if os.path.lexists(staging):
+            self._assert_regular_non_redirect(staging)
+            self._assert_current_owner(staging)
+            staging.unlink()
+            if os.path.lexists(staging):
+                raise TokenStoreError(f"Could not remove stale mutation staging file: {staging}")
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(staging, flags, 0o600)
+        committed = False
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                self._harden_path(staging, directory=False)
+                opened_metadata = os.fstat(stream.fileno())
+                current_metadata = self._assert_regular_non_redirect(staging)
+                if not self._same_file(opened_metadata, current_metadata):
+                    raise TokenStoreError(f"Mutation staging file changed while open: {staging}")
+                os.fsync(stream.fileno())
+            self._sync_directory()
+            self._assert_dedicated_contents(allow_temporary_tokens=True)
+            atomic_replace_file(staging, target)
+            committed = True
+            self._harden_path(target, directory=False)
+            self._sync_directory()
+        finally:
+            if not committed and os.path.lexists(staging):
+                with contextlib.suppress(OSError, TokenStoreError):
+                    self._assert_regular_non_redirect(staging)
+                    self._assert_current_owner(staging)
+                    staging.unlink()
+
+        if self._read_mutation_records_unlocked() != records:
+            raise TokenStoreError("Mutation ledger verification failed after atomic replace")
+
+    @staticmethod
+    def _validate_mutation_records(records: object) -> None:
+        if not isinstance(records, dict) or len(records) > 4096:
+            raise TokenStoreError("Mutation ledger contains too many records")
+        expected_fields = {"capability", "method_name", "fingerprint", "state"}
+        for key, record in records.items():
+            if (
+                not isinstance(key, str)
+                or len(key) != 64
+                or any(character not in "0123456789abcdef" for character in key)
+                or not isinstance(record, dict)
+                or set(record) != expected_fields
+                or not isinstance(record.get("capability"), str)
+                or not 1 <= len(record["capability"]) <= 128
+                or not isinstance(record.get("method_name"), str)
+                or not 1 <= len(record["method_name"]) <= 128
+                or not isinstance(record.get("fingerprint"), str)
+                or len(record["fingerprint"]) != 64
+                or any(character not in "0123456789abcdef" for character in record["fingerprint"])
+                or record.get("state") not in {"in_progress", "succeeded", "unknown"}
+            ):
+                raise TokenStoreError("Mutation ledger contains an invalid record")
 
     def _replace_payload(
         self,
@@ -688,7 +861,9 @@ class TokenStore:
                     return
                 except OSError as exc:
                     if time.monotonic() >= deadline:
-                        raise TokenStoreError(f"Timed out waiting for the {purpose} lock") from exc
+                        raise TokenStoreLockTimeout(
+                            f"Timed out waiting for the {purpose} lock"
+                        ) from exc
                     time.sleep(0.05)
         else:
             import fcntl
@@ -960,11 +1135,25 @@ class TokenStore:
 
     @staticmethod
     def _read_limited(descriptor: int, path: Path) -> bytes:
+        return TokenStore._read_bounded(
+            descriptor,
+            path,
+            MAX_TOKEN_BYTES,
+            "Token artifact",
+        )
+
+    @staticmethod
+    def _read_bounded(
+        descriptor: int,
+        path: Path,
+        maximum_bytes: int,
+        description: str,
+    ) -> bytes:
         size = os.fstat(descriptor).st_size
-        if size > MAX_TOKEN_BYTES:
-            raise TokenStoreError(f"Token artifact exceeds {MAX_TOKEN_BYTES} bytes: {path}")
+        if size > maximum_bytes:
+            raise TokenStoreError(f"{description} exceeds {maximum_bytes} bytes: {path}")
         chunks: list[bytes] = []
-        remaining = MAX_TOKEN_BYTES + 1
+        remaining = maximum_bytes + 1
         while remaining:
             chunk = os.read(descriptor, min(8192, remaining))
             if not chunk:
@@ -972,8 +1161,8 @@ class TokenStore:
             chunks.append(chunk)
             remaining -= len(chunk)
         payload = b"".join(chunks)
-        if len(payload) > MAX_TOKEN_BYTES:
-            raise TokenStoreError(f"Token artifact exceeds {MAX_TOKEN_BYTES} bytes: {path}")
+        if len(payload) > maximum_bytes:
+            raise TokenStoreError(f"{description} exceeds {maximum_bytes} bytes: {path}")
         return payload
 
     def _sync_directory(self) -> None:

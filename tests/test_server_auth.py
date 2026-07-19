@@ -26,7 +26,7 @@ class FakeManager:
         self.error = error
         self.calls = 0
 
-    def get_client(self):
+    def get_read_client(self):
         self.calls += 1
         if self.error:
             raise self.error

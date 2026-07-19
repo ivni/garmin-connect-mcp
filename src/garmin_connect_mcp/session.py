@@ -18,9 +18,14 @@ from .client import (
     GarminAPIError,
     GarminAuthenticationError,
     GarminClientWrapper,
+    GarminMutationClient,
     GarminRateLimitError,
+    GarminReadClient,
+    MutationOperation,
+    MutationRegistry,
 )
 from .token_store import TokenStore, TokenStoreConflict, TokenStoreError
+from .write_policy import READ_METHODS
 
 GarminFactory = Callable[..., Garmin]
 ConfigLoader = Callable[[], GarminConfig]
@@ -41,9 +46,29 @@ class GarminSessionManager:
         self._client: GarminClientWrapper | None = None
         self._garmin: Garmin | None = None
         self._generation: str | None = None
+        self._mutation_registries: dict[str, MutationRegistry] = {}
 
-    def get_client(self) -> GarminClientWrapper:
-        """Return a client loaded in memory from the current secure generation."""
+    def get_read_client(self) -> GarminReadClient:
+        """Return a facade that cannot invoke Garmin mutation methods."""
+        return GarminReadClient(self._get_client(), READ_METHODS)
+
+    def get_mutation_client(
+        self,
+        operation: MutationOperation,
+    ) -> GarminMutationClient:
+        """Return a facade restricted to one authorized mutation method."""
+        with self._lock:
+            client = self._get_client()
+            store = self.get_token_store()
+            key = str(store.directory)
+            registry = self._mutation_registries.get(key)
+            if registry is None:
+                registry = MutationRegistry(journal=store)
+                self._mutation_registries[key] = registry
+            return GarminMutationClient(client, operation, registry)
+
+    def _get_client(self) -> GarminClientWrapper:
+        """Load the unrestricted client for construction of restricted facades only."""
         with self._lock:
             store = self.get_token_store()
             try:

@@ -1,5 +1,7 @@
 """Workout management tools for Garmin Connect MCP server."""
 
+import hashlib
+import json
 from typing import Annotated
 
 from fastmcp import Context
@@ -8,10 +10,9 @@ from ..client import GarminAPIError
 from ..response_builder import ResponseBuilder
 
 
-async def manage_workouts(
-    action: Annotated[str, "Action: 'list', 'get', 'download', 'upload'"],
+async def query_workouts(
+    action: Annotated[str, "Action: 'list', 'get', or 'download'"],
     workout_id: Annotated[int | None, "Workout ID (for get/download actions)"] = None,
-    workout_data: Annotated[str | None, "Workout data (for upload action)"] = None,
     ctx: Context | None = None,
 ) -> str:
     """
@@ -21,7 +22,6 @@ async def manage_workouts(
     - list: Get all workouts
     - get: Get specific workout by ID
     - download: Download workout file
-    - upload: Upload a new workout
     """
     assert ctx is not None
     try:
@@ -38,9 +38,9 @@ async def manage_workouts(
             )
 
         elif action == "get":
-            if workout_id is None:
+            if workout_id is None or workout_id <= 0:
                 return ResponseBuilder.build_error_response(
-                    "Workout ID required for get action",
+                    "A positive workout ID is required for get action",
                     "invalid_parameters",
                     ["Provide workout_id parameter"],
                 )
@@ -52,9 +52,9 @@ async def manage_workouts(
             )
 
         elif action == "download":
-            if workout_id is None:
+            if workout_id is None or workout_id <= 0:
                 return ResponseBuilder.build_error_response(
-                    "Workout ID required for download action",
+                    "A positive workout ID is required for download action",
                     "invalid_parameters",
                     ["Provide workout_id parameter"],
                 )
@@ -65,29 +65,93 @@ async def manage_workouts(
                 metadata={"action": "download", "workout_id": workout_id},
             )
 
-        elif action == "upload":
-            if not workout_data:
-                return ResponseBuilder.build_error_response(
-                    "Workout data required for upload action",
-                    "invalid_parameters",
-                    ["Provide workout_data parameter"],
-                )
-
-            result = client.safe_call("upload_workout", workout_data)
-            return ResponseBuilder.build_response(
-                data={"result": result},
-                analysis={"insights": ["Workout uploaded successfully"]},
-                metadata={"action": "upload"},
-            )
-
         else:
             return ResponseBuilder.build_error_response(
                 f"Invalid action: {action}",
                 "invalid_parameters",
-                ["Valid actions: 'list', 'get', 'download', 'upload'"],
+                ["Valid actions: 'list', 'get', 'download'"],
             )
 
     except GarminAPIError as e:
         return ResponseBuilder.build_error_response(e.message, "api_error")
     except Exception as e:
         return ResponseBuilder.build_error_response(str(e), "internal_error")
+
+
+async def upload_workout(
+    workout_data: Annotated[
+        str,
+        "Workout JSON object or array, maximum 256 KiB and nesting depth 20",
+    ],
+    idempotency_key: Annotated[
+        str | None,
+        "Unique 8-128 character operation key; required when dry_run is false",
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        "Validate and preview locally without contacting Garmin; set false to execute",
+    ] = True,
+    ctx: Context | None = None,
+) -> str:
+    """Validate, preview, or upload a structured workout."""
+    try:
+        size, digest = _validate_workout_data(workout_data)
+        preview = {"size_bytes": size, "sha256": digest}
+        if dry_run:
+            return ResponseBuilder.build_response(
+                data={"preview": preview},
+                analysis={"insights": ["Dry-run only; Garmin was not contacted"]},
+                metadata={"dry_run": True, "capability": "workouts.upload"},
+            )
+        if idempotency_key is None:
+            raise ValueError("idempotency_key is required when dry_run is false")
+        assert ctx is not None
+        client = await ctx.get_state("client")
+        result = client.mutate(
+            "upload_workout",
+            workout_data,
+            idempotency_key=idempotency_key,
+        )
+        return ResponseBuilder.build_response(
+            data={"result": result, **preview},
+            analysis={"insights": ["Workout uploaded successfully"]},
+            metadata={
+                "dry_run": False,
+                "capability": "workouts.upload",
+                "idempotency_key": idempotency_key,
+            },
+        )
+    except ValueError as e:
+        return ResponseBuilder.build_error_response(str(e), "invalid_parameters")
+    except GarminAPIError as e:
+        return ResponseBuilder.build_error_response(e.message, "api_error")
+    except Exception as e:
+        return ResponseBuilder.build_error_response(str(e), "internal_error")
+
+
+def _validate_workout_data(value: str) -> tuple[int, str]:
+    encoded = value.encode("utf-8")
+    if not encoded or len(encoded) > 256 * 1024:
+        raise ValueError("workout_data must contain from 1 byte through 256 KiB of JSON")
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"workout_data must be valid JSON: {exc.msg}") from exc
+    if not isinstance(payload, dict | list):
+        raise ValueError("workout_data must be a JSON object or array")
+
+    nodes = 0
+    stack = [(payload, 1)]
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > 10_000:
+            raise ValueError("workout_data must contain no more than 10,000 JSON values")
+        if depth > 20:
+            raise ValueError("workout_data nesting depth must not exceed 20")
+        if isinstance(current, dict):
+            stack.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            stack.extend((item, depth + 1) for item in current)
+
+    return len(encoded), hashlib.sha256(encoded).hexdigest()

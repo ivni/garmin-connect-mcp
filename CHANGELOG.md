@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only a current-owned quarantine, and revalidate owner-only protection immediately before purge
 - Keep successful Garmin mutations successful when later token persistence fails; invalidate
   and warn instead of encouraging a duplicate retry
+- Make Garmin writes default-off behind independent operator capabilities, restricted client
+  facades, bounded dry-runs, mutation idempotency keys, and ambiguous-outcome reconciliation
+- Split read, write, and destructive-delete tools; require preview-bound confirmation for weight
+  deletion and advertise it with the destructive MCP annotation
 - Keep password and MFA inputs ephemeral instead of saving Garmin credentials to dotenv files
 - Authenticate the MCP runtime from tokens only, without automatic password fallback
 

@@ -10,7 +10,7 @@ A Model Context Protocol (MCP) server for Garmin Connect integration. Access you
 
 ## Overview
 
-This MCP server provides 22 tools to interact with your Garmin Connect account, organized into 8 categories:
+This MCP server provides 26 tools to interact with your Garmin Connect account, organized into 9 categories:
 
 - Activities (3 tools) - Query activities and view detailed metrics
 - Analysis (2 tools) - Compare activities and find similar workouts
@@ -19,8 +19,8 @@ This MCP server provides 22 tools to interact with your Garmin Connect account, 
 - User Profile (1 tool) - Access profile, statistics, and personal records
 - Challenges & Goals (2 tools) - Track goals, PRs, badges, and challenges
 - Devices & Gear (2 tools) - Manage devices and equipment
-- Weight Management (2 tools) - Track weight data
-- Other (3 tools) - Workouts, manual data entry, women's health tracking
+- Weight Management (3 tools) - Query, add, or explicitly delete weight data
+- Other (6 tools) - Workouts, capability-scoped health logging, women's health tracking
 
 Additionally, the server provides:
 
@@ -181,6 +181,64 @@ that generation before each remote call and conditionally revalidates or persist
 An external re-authentication permanently revokes older wrappers, so a multi-call operation cannot
 continue against a stale account generation.
 
+### Write Capabilities
+
+The server is read-only by default. Read tools receive a method-restricted client facade, and a
+normal server start cannot call any Garmin mutation method. Mutation previews run locally without
+loading Garmin tokens. To execute a write, the host operator must set `GARMIN_WRITE_CAPABILITIES`
+before starting the server to a comma-separated list containing only the required capabilities:
+
+| Capability                | Permitted operation          |
+| ------------------------- | ---------------------------- |
+| `weight.write`            | Add a weight entry           |
+| `weight.delete`           | Delete selected weigh-ins    |
+| `workouts.upload`         | Upload a workout             |
+| `health.body_composition` | Log body-composition data    |
+| `health.blood_pressure`   | Log blood-pressure data      |
+| `health.hydration`        | Log hydration data           |
+
+For example, enable weight addition and hydration logging without granting deletion or workout
+upload:
+
+```bash
+GARMIN_WRITE_CAPABILITIES=weight.write,health.hydration uvx garmin-connect-mcp
+```
+
+Unknown capability names fail server startup. Enabling one capability never enables another, and
+the value is read once when the server process starts. Restart the host after changing it. Do not
+place credentials or health values in this setting.
+
+Every mutation tool defaults to `dry_run=true`, validates input bounds, and returns a preview
+without contacting Garmin. Execution requires all of the following:
+
+1. The exact capability enabled by the operator.
+2. `dry_run=false` in the tool call.
+3. A caller-provided `idempotency_key` of 8-128 safe characters.
+
+Weight deletion additionally requires the exact `required_confirmation` returned by a dry-run for
+the selected IDs and is advertised to MCP clients as destructive. Inputs have conservative size,
+range, count, and JSON-depth limits before any authenticated client is requested.
+
+The server never automatically retries writes. A protected ledger in the dedicated token directory
+stores only capability/key hashes, input fingerprints, and outcome states—never mutation inputs,
+health values, or Garmin responses. Replaying the same capability, idempotency key, and inputs is
+deduplicated across process restarts without another Garmin call; reusing a key with different
+inputs is rejected. Confirmed and ambiguous records are never evicted to make room: when the
+1,024-record safety bound is reached, new writes fail closed until an operator intentionally
+archives the installation and starts with a fresh dedicated store.
+
+Mutation transactions are serialized across server processes until Garmin's outcome is durably
+recorded. A concurrent caller waits; if that wait times out, it must wait longer and retry the
+same request with the same idempotency key, never a new key. An `in_progress` record can therefore
+be observed only after its former lock owner exited without finalizing and is quarantined as an
+abandoned, potentially committed operation.
+
+If a response is lost or another genuinely ambiguous transport error occurs, that key is
+quarantined and the response tells the caller which read tool to use for reconciliation instead of
+advising a blind retry. Definite validation, authorization, and other pre-dispatch failures release
+their reservation so a corrected request can safely reuse the key. Audit logs record capability,
+method, an idempotency-key hash, and outcome, but not mutation inputs or health values.
+
 ## Claude Desktop Configuration
 
 Add to your configuration file:
@@ -198,11 +256,17 @@ published package:
   "mcpServers": {
     "garmin": {
       "command": "uvx",
-      "args": ["garmin-connect-mcp"]
+      "args": ["garmin-connect-mcp"],
+      "env": {
+        "GARMIN_WRITE_CAPABILITIES": ""
+      }
     }
   }
 }
 ```
+
+Keep the value empty for read-only operation. Replace it with the minimal comma-separated list
+from the capability table only when writes are intentionally enabled.
 
 ### Using Local Source
 
@@ -245,6 +309,8 @@ uv run garmin-connect-mcp auth
         "garmin-connect-mcp-tokens:/root/.garmin-connect-mcp",
         "-e",
         "GARMINTOKENS=/root/.garmin-connect-mcp/tokens",
+        "-e",
+        "GARMIN_WRITE_CAPABILITIES=",
         "ghcr.io/eddmann/garmin-connect-mcp:latest"
       ]
     }
@@ -254,6 +320,8 @@ uv run garmin-connect-mcp auth
 
 Create and authenticate the `garmin-connect-mcp-tokens` named volume with the Docker bootstrap
 command above before starting Claude Desktop. Reuse that exact volume name in both commands.
+The empty write-capability value is explicit read-only mode; replace it only with the minimal list
+needed by that host.
 
 ## Usage
 
@@ -360,20 +428,24 @@ _Note: List-returning tools use cursor-based pagination with default limits (10 
 | `query_devices` | Query device information (with settings, solar data, alarms) |
 | `query_gear`    | Query gear and equipment (with defaults and usage stats)     |
 
-### Weight Management (2 tools)
+### Weight Management (3 tools)
 
-| Tool                 | Description                         |
-| -------------------- | ----------------------------------- |
-| `query_weight_data`  | Query weight data for date or range |
-| `manage_weight_data` | Add or delete weight entries        |
+| Tool                    | Description                                                |
+| ----------------------- | ---------------------------------------------------------- |
+| `query_weight_data`     | Query weight data for date or range                        |
+| `add_weight_entry`      | Preview or add one bounded entry with `weight.write`       |
+| `delete_weight_entries` | Preview or confirm destructive deletion with `weight.delete` |
 
-### Other (3 tools)
+### Other (6 tools)
 
-| Tool                  | Description                                      |
-| --------------------- | ------------------------------------------------ |
-| `manage_workouts`     | Workout management (list, get, download, upload) |
-| `log_health_data`     | Log body composition, blood pressure, hydration  |
-| `query_womens_health` | Query pregnancy and menstrual cycle data         |
+| Tool                   | Description                                                        |
+| ---------------------- | ------------------------------------------------------------------ |
+| `query_workouts`       | List, get, or download workouts without mutation                   |
+| `upload_workout`       | Validate, preview, or upload with `workouts.upload`                |
+| `log_body_composition` | Validate, preview, or log with `health.body_composition`           |
+| `log_blood_pressure`   | Validate, preview, or log with `health.blood_pressure`             |
+| `log_hydration`        | Validate, preview, or log with `health.hydration`                  |
+| `query_womens_health`  | Query pregnancy and menstrual cycle data                           |
 
 ## MCP Resources
 
